@@ -13,3 +13,5 @@ Thumbs.db
 .env.local
 lcov.info
 *.profraw
+status.md
+arxia_keypair.json
