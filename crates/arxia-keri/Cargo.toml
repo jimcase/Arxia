@@ -1,0 +1,26 @@
+[package]
+name = "arxia-keri"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "KERI Identity and Wallet Integration for Arxia"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
+arxia-did = { path = "../arxia-did" }
+
+keri-core = { path = "/home/caso/projects/keriox-source/keriox_core" }
+blake3 = { workspace = true }
+
+bs58 = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = "2"
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
