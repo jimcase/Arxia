@@ -68,7 +68,14 @@ impl BlockTypeTag {
 /// platforms (Windows, Linux, macOS, ESP-IDF). Only the
 /// `duration_since(UNIX_EPOCH)` step could fail pre-fix, and that
 /// failure mode is now absorbed.
+///
+/// On WASM `SystemTime::now()` panics (no system clock), so we
+/// return 0 as a safe sentinel.
 pub fn now_millis() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    return 0;
+
+    #[cfg(not(target_arch = "wasm32"))]
     millis_since_epoch_or_zero(SystemTime::now())
 }
 
