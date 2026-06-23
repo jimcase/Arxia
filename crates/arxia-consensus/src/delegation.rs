@@ -40,6 +40,7 @@
 //! existing call sites compile unchanged.
 
 use std::collections::{HashMap, HashSet};
+use serde::{Serialize, Deserialize};
 
 /// Maximum allowed depth of the delegation chain when checking
 /// cycles or computing transitive stake. Caps the DFS at insert
@@ -114,7 +115,7 @@ impl std::fmt::Display for DelegationError {
 impl std::error::Error for DelegationError {}
 
 /// A delegation record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     /// The account delegating its stake.
     pub delegator: String,
@@ -134,7 +135,7 @@ pub struct Delegation {
 /// representative_pubkey || nonce_le) under their Ed25519 key
 /// ; [`DelegationGraph::revoke`] verifies the signature before
 /// removing the edge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {
     /// 32-byte Ed25519 public key of the delegator. Must match
     /// the `delegator` field of the edge being revoked AND
@@ -148,6 +149,7 @@ pub struct Revocation {
     /// Prevents replay of a stale revocation.
     pub nonce: u64,
     /// Ed25519 signature over [`Self::canonical_bytes`].
+    #[serde(with = "serde_signature")]
     pub signature: [u8; 64],
 }
 
@@ -191,7 +193,7 @@ impl Revocation {
 /// mutations do NOT affect the snapshot ; the consensus layer
 /// uses the snapshot to compute stake-weighted finality without
 /// race conditions against concurrent delegation churn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationSnapshot {
     totals: HashMap<String, u64>,
 }
@@ -602,5 +604,25 @@ mod tests {
             g.revoke(&rev_with_wrong_nonce).unwrap_err(),
             DelegationError::InvalidRevocationSignature
         );
+    }
+}
+
+mod serde_signature {
+    use serde::{Serialize, Serializer, Deserialize, Deserializer, de::Error};
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let vec = bytes.to_vec();
+        vec.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        let array: [u8; 64] = vec.try_into().map_err(|_| D::Error::custom("expected 64 bytes"))?;
+        Ok(array)
     }
 }

@@ -4,8 +4,32 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "WebAssembly bindings for Arxia (future)"
+description = "WebAssembly bindings for Arxia — wallet operations in the browser"
 authors = []
 
+[lib]
+# cdylib = dynamic library consumed by wasm-bindgen
+# rlib  = allows `cargo test` to run against this crate natively
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-arxia-core = { path = "../arxia-core" }
+arxia-core    = { path = "../arxia-core" }
+arxia-lattice = { path = "../arxia-lattice" }
+arxia-did     = { path = "../arxia-did" }
+arxia-consensus = { path = "../arxia-consensus" }
+arxia-finality  = { path = "../arxia-finality" }
+arxia-gossip    = { path = "../arxia-gossip" }
+arxia-crypto    = { path = "../arxia-crypto" }
+arxia-crdt      = { path = "../arxia-crdt" }
+ed25519-dalek = { workspace = true }
+hex           = { workspace = true }
+rand          = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+wasm-bindgen  = "0.2"
+console_error_panic_hook = "0.1.7"
+base64        = "0.22"
+
+# getrandom must use browser crypto.getRandomValues when targeting wasm32
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

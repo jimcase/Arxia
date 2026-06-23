@@ -150,6 +150,22 @@ pub enum GossipMessage {
         /// Timestamp.
         timestamp: u64,
     },
+    /// A validator's ORV vote for conflict resolution.
+    ///
+    /// Carried as hex strings so serde can handle the byte arrays
+    /// without depending on `serde-big-array`.
+    ValidatorVote {
+        /// Blake3 hash of the block being voted on (hex).
+        block_hash: String,
+        /// Ed25519 public key of the voting validator (hex).
+        voter_pubkey: String,
+        /// Delegated stake on this validator (micro-ARX).
+        delegated_stake: u64,
+        /// Vote nonce for replay protection.
+        nonce: u64,
+        /// Ed25519 signature over the vote hash (hex, 128 chars).
+        signature: String,
+    },
 }
 
 impl GossipMessage {
@@ -189,7 +205,7 @@ impl GossipMessage {
                 }
                 Ok(())
             }
-            Self::NonceSyncRequest { .. } | Self::Ping { .. } => Ok(()),
+            Self::NonceSyncRequest { .. } | Self::Ping { .. } | Self::ValidatorVote { .. } => Ok(()),
         }
     }
 

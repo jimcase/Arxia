@@ -90,6 +90,9 @@ pub mod variant_tag {
     pub const NONCE_SYNC_RESPONSE: u8 = 0x03;
     /// Tag for the `Ping` variant of [`crate::GossipMessage`].
     pub const PING: u8 = 0x04;
+    /// Tag for the `ValidatorVote` variant of
+    /// [`crate::GossipMessage`].
+    pub const VALIDATOR_VOTE: u8 = 0x05;
 }
 
 /// Errors returned by [`SignedGossipMessage::verify`].
@@ -221,6 +224,9 @@ fn estimate_message_size(m: &GossipMessage) -> usize {
         GossipMessage::NonceSyncRequest { from } => 1 + 8 + from.len(),
         GossipMessage::NonceSyncResponse { entries } => 1 + 8 + entries.len() * (32 + 8 + 32),
         GossipMessage::Ping { node_id, .. } => 1 + 8 + 8 + node_id.len(),
+        GossipMessage::ValidatorVote { block_hash, voter_pubkey, signature, .. } => {
+            1 + 8 + block_hash.len() + 8 + voter_pubkey.len() + 8 + 8 + 8 + signature.len()
+        }
     }
 }
 
@@ -252,6 +258,23 @@ fn encode_message_into(buf: &mut Vec<u8>, m: &GossipMessage) {
             buf.extend_from_slice(&timestamp.to_be_bytes());
             buf.extend_from_slice(&(node_id.len() as u64).to_be_bytes());
             buf.extend_from_slice(node_id.as_bytes());
+        }
+        GossipMessage::ValidatorVote {
+            block_hash,
+            voter_pubkey,
+            delegated_stake,
+            nonce,
+            signature,
+        } => {
+            buf.push(variant_tag::VALIDATOR_VOTE);
+            buf.extend_from_slice(&(block_hash.len() as u64).to_be_bytes());
+            buf.extend_from_slice(block_hash.as_bytes());
+            buf.extend_from_slice(&(voter_pubkey.len() as u64).to_be_bytes());
+            buf.extend_from_slice(voter_pubkey.as_bytes());
+            buf.extend_from_slice(&delegated_stake.to_be_bytes());
+            buf.extend_from_slice(&nonce.to_be_bytes());
+            buf.extend_from_slice(&(signature.len() as u64).to_be_bytes());
+            buf.extend_from_slice(signature.as_bytes());
         }
     }
 }
@@ -322,6 +345,16 @@ mod tests {
         assert_eq!(&bytes[off..off + 32], &pk);
     }
 
+    fn validator_vote() -> GossipMessage {
+        GossipMessage::ValidatorVote {
+            block_hash: "aa".repeat(32),
+            voter_pubkey: "bb".repeat(32),
+            delegated_stake: 1_000_000,
+            nonce: 1,
+            signature: "cc".repeat(64),
+        }
+    }
+
     #[test]
     fn test_canonical_bytes_variant_tags_are_distinct() {
         let pk = [0u8; 32];
@@ -329,17 +362,20 @@ mod tests {
         let b2 = SignedGossipMessage::canonical_bytes(&nonce_sync_request("a"), &pk);
         let b3 = SignedGossipMessage::canonical_bytes(&nonce_sync_response(0), &pk);
         let b4 = SignedGossipMessage::canonical_bytes(&ping("a", 0), &pk);
+        let b5 = SignedGossipMessage::canonical_bytes(&validator_vote(), &pk);
         let tag_off = GOSSIP_MESSAGE_DOMAIN.len() + 32;
         assert_eq!(b1[tag_off], variant_tag::BLOCK_ANNOUNCE);
         assert_eq!(b2[tag_off], variant_tag::NONCE_SYNC_REQUEST);
         assert_eq!(b3[tag_off], variant_tag::NONCE_SYNC_RESPONSE);
         assert_eq!(b4[tag_off], variant_tag::PING);
-        // All four tags are pairwise distinct.
+        assert_eq!(b5[tag_off], variant_tag::VALIDATOR_VOTE);
+        // All five tags are pairwise distinct.
         let tags = [
             variant_tag::BLOCK_ANNOUNCE,
             variant_tag::NONCE_SYNC_REQUEST,
             variant_tag::NONCE_SYNC_RESPONSE,
             variant_tag::PING,
+            variant_tag::VALIDATOR_VOTE,
         ];
         for i in 0..tags.len() {
             for j in 0..tags.len() {

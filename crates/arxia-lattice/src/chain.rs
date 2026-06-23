@@ -422,6 +422,71 @@ impl AccountChain {
         self.consumed_sources.insert(send_block.hash.clone());
         Ok(block)
     }
+
+    /// Revoke a credential by creating a REVOKE block.
+    pub fn revoke_credential(
+        &mut self,
+        credential_hash: &str,
+        vclock: &mut VectorClock,
+    ) -> Result<Block, ArxiaError> {
+        let sid = self.public_key_hex[..8].to_string();
+        vclock.tick(&sid);
+        self.nonce += 1;
+        let previous = self
+            .chain
+            .last()
+            .map(|b| b.hash.clone())
+            .unwrap_or_default();
+        let timestamp = arxia_core::now_millis();
+        let block_type = BlockType::Revoke {
+            credential_hash: credential_hash.to_string(),
+        };
+        let hash = Block::compute_hash(
+            &self.public_key_hex,
+            &previous,
+            &block_type,
+            self.balance,
+            self.nonce,
+            timestamp,
+        )?;
+        let hash_bytes = hex::decode(&hash).map_err(ArxiaError::HexDecode)?;
+        let signature = self.signing_key.sign(&hash_bytes);
+        let block = Block {
+            account: self.public_key_hex.clone(),
+            previous,
+            block_type,
+            balance: self.balance,
+            nonce: self.nonce,
+            timestamp,
+            hash,
+            signature: signature.to_bytes().to_vec(),
+        };
+        self.chain.push(block.clone());
+        Ok(block)
+    }
+
+    /// Reconstruct an account chain from an existing signing key and list of blocks.
+    pub fn from_key_and_blocks(signing_key: SigningKey, chain: Vec<Block>) -> Self {
+        let verifying_key = signing_key.verifying_key();
+        let public_key_hex = hex::encode(verifying_key.as_bytes());
+        let balance = chain.last().map(|b| b.balance).unwrap_or(0);
+        let nonce = chain.last().map(|b| b.nonce).unwrap_or(0);
+        let mut consumed_sources = HashSet::new();
+        for block in &chain {
+            if let BlockType::Receive { source_hash } = &block.block_type {
+                consumed_sources.insert(source_hash.clone());
+            }
+        }
+        Self {
+            signing_key,
+            verifying_key,
+            public_key_hex,
+            chain,
+            balance,
+            nonce,
+            consumed_sources,
+        }
+    }
 }
 
 impl Default for AccountChain {
@@ -475,6 +540,22 @@ mod tests {
         let mut alice = AccountChain::new();
         alice.open(1_000, &mut vc).unwrap();
         assert!(alice.send("dest", 0, &mut vc).is_err());
+    }
+
+    #[test]
+    fn test_revoke_credential() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        let cred_hash = "0".repeat(64);
+        let revoke = alice.revoke_credential(&cred_hash, &mut vc).unwrap();
+        assert_eq!(alice.balance, 1_000_000); // Balance should not change
+        assert_eq!(revoke.nonce, 2);
+        assert_eq!(revoke.previous, alice.chain[0].hash);
+        assert!(matches!(
+            revoke.block_type,
+            BlockType::Revoke { ref credential_hash } if credential_hash == &cred_hash
+        ));
     }
 
     #[test]
