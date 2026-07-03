@@ -28,6 +28,7 @@
 use arxia_core::ArxiaError;
 use ed25519_dalek::SigningKey;
 use std::collections::HashSet;
+use ml_dsa::signature::{Keypair, SignatureEncoding};
 
 /// A single ORV vote from a representative.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,10 @@ pub struct VoteORV {
     pub nonce: u64,
     /// Ed25519 signature over the vote hash.
     pub signature: [u8; 64],
+    /// Optional post-quantum public key for FIPS 204 ML-DSA-65 validation.
+    pub pq_public_key: Option<Vec<u8>>,
+    /// Optional post-quantum signature for FIPS 204 ML-DSA-65 validation.
+    pub pq_signature: Option<Vec<u8>>,
 }
 
 /// Computes the Blake3 hash of a vote content.
@@ -73,7 +78,27 @@ pub fn verify_vote(vote: &VoteORV) -> Result<(), ArxiaError> {
         vote.delegated_stake,
         vote.nonce,
     );
-    arxia_crypto::verify(&vote.voter_pubkey, &hash, &vote.signature)
+    arxia_crypto::verify(&vote.voter_pubkey, &hash, &vote.signature)?;
+
+    // Post-Quantum ML-DSA-65 verification
+    if let (Some(pq_pub), Some(pq_sig)) = (&vote.pq_public_key, &vote.pq_signature) {
+        use ml_dsa::{MlDsa65, VerifyingKey, Signature, EncodedVerifyingKey, EncodedSignature};
+        use ml_dsa::signature::Verifier as PqVerify;
+        
+        let encoded_key = EncodedVerifyingKey::<MlDsa65>::try_from(pq_pub.as_slice())
+            .map_err(|e| ArxiaError::InvalidKey(format!("Malformed PQ public key length: {e}")))?;
+        let pq_vk = VerifyingKey::<MlDsa65>::decode(&encoded_key);
+        
+        let encoded_sig = EncodedSignature::<MlDsa65>::try_from(pq_sig.as_slice())
+            .map_err(|e| ArxiaError::SignatureInvalid(format!("Malformed PQ signature length: {e}")))?;
+        let sig = Signature::<MlDsa65>::decode(&encoded_sig)
+            .ok_or_else(|| ArxiaError::SignatureInvalid("Malformed PQ signature encoding".into()))?;
+            
+        PqVerify::verify(&pq_vk, &hash, &sig)
+            .map_err(|e| ArxiaError::SignatureInvalid(format!("PQ signature verify failed: {e}")))?;
+    }
+
+    Ok(())
 }
 
 /// Ingress validation for a received vote: signature + inclusion.
@@ -128,6 +153,37 @@ pub fn cast_vote(
         delegated_stake,
         nonce,
         signature,
+        pq_public_key: None,
+        pq_signature: None,
+    }
+}
+
+/// Creates and signs a new vote with both Ed25519 and ML-DSA-65.
+pub fn cast_vote_pq(
+    signing_key: &SigningKey,
+    pq_signing_key: &ml_dsa::SigningKey<ml_dsa::MlDsa65>,
+    block_hash: [u8; 32],
+    delegated_stake: u64,
+    nonce: u64,
+) -> VoteORV {
+    use ml_dsa::signature::Signer;
+    use ml_dsa::KeyExport;
+    
+    let voter_pubkey = signing_key.verifying_key().to_bytes();
+    let hash = compute_vote_hash(&block_hash, &voter_pubkey, delegated_stake, nonce);
+    let signature = arxia_crypto::sign(signing_key, &hash);
+    
+    let pq_pubkey = pq_signing_key.verifying_key().to_bytes().as_slice().to_vec();
+    let pq_sig = pq_signing_key.sign(&hash).to_bytes().as_slice().to_vec();
+    
+    VoteORV {
+        block_hash,
+        voter_pubkey,
+        delegated_stake,
+        nonce,
+        signature,
+        pq_public_key: Some(pq_pubkey),
+        pq_signature: Some(pq_sig),
     }
 }
 
@@ -262,5 +318,42 @@ mod tests {
         assert!(verify_vote_known(&v3, &known).is_ok());
         let err = verify_vote_known(&v_phantom, &known).expect_err("phantom must reject");
         assert!(matches!(err, ArxiaError::UnknownVoteTarget { .. }));
+    }
+
+    #[test]
+    fn test_verify_vote_with_post_quantum_signature() {
+        use ml_dsa::{MlDsa65, SigningKey, Generate};
+        let (sk, vk) = generate_keypair();
+        let bh = [0x12; 32];
+        
+        let mut vote = cast_vote(&sk, bh, 5_000_000, 1);
+        assert_eq!(vote.voter_pubkey, vk.to_bytes());
+        
+        // 1. Classical verification is ok
+        assert!(verify_vote(&vote).is_ok());
+        
+        // 2. Add valid PQ signature
+        let pq_sk = SigningKey::<MlDsa65>::generate();
+        let pq_vk = pq_sk.verifying_key();
+        
+        let hash = compute_vote_hash(
+            &vote.block_hash,
+            &vote.voter_pubkey,
+            vote.delegated_stake,
+            vote.nonce,
+        );
+        use ml_dsa::signature::Signer;
+        use ml_dsa::KeyExport;
+        let pq_sig = pq_sk.sign(&hash);
+        
+        vote.pq_public_key = Some(pq_vk.to_bytes().as_slice().to_vec());
+        vote.pq_signature = Some(pq_sig.to_bytes().as_slice().to_vec());
+        
+        assert!(verify_vote(&vote).is_ok());
+        
+        // 3. Tampering with the PQ signature should fail verification
+        let mut tampered_vote = vote.clone();
+        tampered_vote.pq_signature = Some(vec![0u8; pq_sig.to_bytes().len()]);
+        assert!(verify_vote(&tampered_vote).is_err());
     }
 }

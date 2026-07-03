@@ -477,6 +477,8 @@ pub fn build_gossip_ping(sk_hex: &str, node_id: &str, timestamp_ms: u64) -> Resu
         message,
         sender_pubkey,
         signature: sig.to_vec(),
+        pq_public_key: None,
+        pq_signature: None,
     };
     serde_json::to_string(&envelope).map_err(|e| e.to_string())
 }
@@ -513,6 +515,8 @@ pub fn build_gossip_block_announce(
         message,
         sender_pubkey,
         signature: sig.to_vec(),
+        pq_public_key: None,
+        pq_signature: None,
     };
     serde_json::to_string(&envelope).map_err(|e| e.to_string())
 }
@@ -538,6 +542,8 @@ pub fn build_gossip_validator_vote(
         delegated_stake: vote.delegated_stake,
         nonce: vote.nonce,
         signature: hex::encode(vote.signature),
+        pq_public_key: None,
+        pq_signature: None,
     };
     let canonical = arxia_gossip::SignedGossipMessage::canonical_bytes(&message, &sender_pubkey);
     let sig = arxia_crypto::sign(&sk, &canonical);
@@ -545,7 +551,72 @@ pub fn build_gossip_validator_vote(
         message,
         sender_pubkey,
         signature: sig.to_vec(),
+        pq_public_key: None,
+        pq_signature: None,
     };
+    serde_json::to_string(&envelope).map_err(|e| e.to_string())
+}
+
+/// Build a hybrid `SignedGossipMessage::ValidatorVote` envelope signed
+/// with both Ed25519 and ML-DSA-65 keys.
+#[wasm_bindgen]
+pub fn build_gossip_validator_vote_pq(
+    sk_hex: &str,
+    pq_sk_seed_hex: &str,
+    block_hash_hex: &str,
+    delegated_stake_micro_arx: u64,
+    vote_nonce: u64,
+) -> Result<String, String> {
+    console_error_panic_hook::set_once();
+    let sk = signing_key_from_hex(sk_hex)?;
+    
+    // Parse post-quantum seed
+    let pq_seed_bytes = hex::decode(pq_sk_seed_hex)
+        .map_err(|e| format!("invalid pq seed hex: {e}"))?;
+    if pq_seed_bytes.len() != 32 {
+        return Err("PQ seed must be exactly 32 bytes".to_string());
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&pq_seed_bytes);
+    
+    use ml_dsa::{MlDsa65, SigningKey, KeyExport};
+    use ml_dsa::signature::{Signer, Keypair, SignatureEncoding};
+    
+    let pq_sk = SigningKey::<MlDsa65>::from_seed(&seed.into());
+    let pq_vk = pq_sk.verifying_key();
+    
+    let block_hash = decode_block_hash_hex_v3(block_hash_hex)?;
+    
+    // 1. Cast classical + PQ vote
+    let vote = arxia_consensus::cast_vote_pq(&sk, &pq_sk, block_hash, delegated_stake_micro_arx, vote_nonce);
+    
+    let vk = sk.verifying_key();
+    let sender_pubkey = vk.to_bytes();
+    
+    // 2. Build gossip ValidatorVote message
+    let message = arxia_gossip::GossipMessage::ValidatorVote {
+        block_hash: hex::encode(vote.block_hash),
+        voter_pubkey: hex::encode(vote.voter_pubkey),
+        delegated_stake: vote.delegated_stake,
+        nonce: vote.nonce,
+        signature: hex::encode(vote.signature),
+        pq_public_key: Some(hex::encode(pq_vk.to_bytes())),
+        pq_signature: Some(hex::encode(vote.pq_signature.as_ref().unwrap())),
+    };
+    
+    // 3. Build signed envelope
+    let canonical = arxia_gossip::SignedGossipMessage::canonical_bytes(&message, &sender_pubkey);
+    let sig = arxia_crypto::sign(&sk, &canonical);
+    let pq_sig_envelope = pq_sk.sign(&canonical);
+    
+    let envelope = arxia_gossip::SignedGossipMessage {
+        message,
+        sender_pubkey,
+        signature: sig.to_vec(),
+        pq_public_key: Some(pq_vk.to_bytes().as_slice().to_vec()),
+        pq_signature: Some(pq_sig_envelope.to_bytes().as_slice().to_vec()),
+    };
+    
     serde_json::to_string(&envelope).map_err(|e| e.to_string())
 }
 
@@ -907,12 +978,24 @@ pub fn verify_validator_vote(
     let signature: [u8; 64] = signature_bytes
         .try_into()
         .map_err(|_| "signature must be 64 bytes".to_string())?;
+    
+    let pq_public_key = parsed
+        .get("pq_public_key")
+        .and_then(|v| v.as_str())
+        .and_then(|s| hex::decode(s).ok());
+    let pq_signature = parsed
+        .get("pq_signature")
+        .and_then(|v| v.as_str())
+        .and_then(|s| hex::decode(s).ok());
+
     let vote = arxia_consensus::VoteORV {
         block_hash,
         voter_pubkey,
         delegated_stake,
         nonce,
         signature,
+        pq_public_key,
+        pq_signature,
     };
     let known: Vec<String> = serde_json::from_str(known_block_hashes_hex_json)
         .map_err(|e| format!("known_block_hashes JSON: {e}"))?;
@@ -1090,6 +1173,8 @@ pub fn build_nonce_sync_response(
         message,
         sender_pubkey,
         signature: sig.to_vec(),
+        pq_public_key: None,
+        pq_signature: None,
     };
     serde_json::to_string(&envelope).map_err(|e| e.to_string())
 }
@@ -1479,6 +1564,38 @@ mod tests {
             }
             _ => panic!("expected ValidatorVote"),
         }
+    }
+
+    #[test]
+    fn test_build_gossip_validator_vote_pq_round_trips() {
+        let (sk, _vk) = fresh_keypair_hex();
+        let pq_seed = "12".repeat(32);
+        let bh = "ab".repeat(32);
+        let envelope_json = build_gossip_validator_vote_pq(&sk, &pq_seed, &bh, 5_000_000, 1).unwrap();
+        // The envelope must be a valid signed message.
+        assert!(verify_gossip_envelope(&envelope_json).unwrap());
+        // The inner message must be a ValidatorVote with the right hash and PQ fields.
+        let env: arxia_gossip::SignedGossipMessage =
+            serde_json::from_str(&envelope_json).unwrap();
+        match env.message {
+            arxia_gossip::GossipMessage::ValidatorVote {
+                block_hash,
+                delegated_stake,
+                nonce,
+                pq_public_key,
+                pq_signature,
+                ..
+            } => {
+                assert_eq!(block_hash, bh);
+                assert_eq!(delegated_stake, 5_000_000);
+                assert_eq!(nonce, 1);
+                assert!(pq_public_key.is_some());
+                assert!(pq_signature.is_some());
+            }
+            _ => panic!("expected ValidatorVote"),
+        }
+        assert!(env.pq_public_key.is_some());
+        assert!(env.pq_signature.is_some());
     }
 
     #[test]

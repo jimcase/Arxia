@@ -16,3 +16,4 @@ blake3 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
+ml-dsa = { workspace = true }

@@ -165,6 +165,10 @@ pub enum GossipMessage {
         nonce: u64,
         /// Ed25519 signature over the vote hash (hex, 128 chars).
         signature: String,
+        /// Optional post-quantum public key (hex, FIPS 204 ML-DSA-65).
+        pq_public_key: Option<String>,
+        /// Optional post-quantum signature (hex, FIPS 204 ML-DSA-65).
+        pq_signature: Option<String>,
     },
 }
 

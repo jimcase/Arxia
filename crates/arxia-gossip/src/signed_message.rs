@@ -113,6 +113,12 @@ pub enum SignedGossipMessageError {
     /// length-bound violations such as oversized
     /// `BlockAnnounce::block_data` payloads.
     MessageInvalid(MessageError),
+    /// Post-quantum public key is structurally invalid.
+    InvalidPqPublicKey,
+    /// Post-quantum signature is structurally invalid or has wrong length.
+    InvalidPqSignatureLength,
+    /// The post-quantum signature verification failed.
+    PqSignatureInvalid,
 }
 
 impl std::fmt::Display for SignedGossipMessageError {
@@ -126,6 +132,9 @@ impl std::fmt::Display for SignedGossipMessageError {
                 f.write_str("signature does not verify against the sender pubkey")
             }
             Self::MessageInvalid(e) => write!(f, "gossip message structurally invalid: {}", e),
+            Self::InvalidPqPublicKey => f.write_str("pq_public_key is structurally invalid"),
+            Self::InvalidPqSignatureLength => f.write_str("pq_signature has invalid length"),
+            Self::PqSignatureInvalid => f.write_str("pq_signature verification failed"),
         }
     }
 }
@@ -147,6 +156,10 @@ pub struct SignedGossipMessage {
     /// Ed25519 signature over [`Self::canonical_bytes`]. MUST be
     /// exactly 64 bytes for a valid envelope.
     pub signature: Vec<u8>,
+    /// Optional post-quantum public key (FIPS 204 ML-DSA-65).
+    pub pq_public_key: Option<Vec<u8>>,
+    /// Optional post-quantum signature (FIPS 204 ML-DSA-65).
+    pub pq_signature: Option<Vec<u8>>,
 }
 
 impl SignedGossipMessage {
@@ -212,7 +225,27 @@ impl SignedGossipMessage {
         arxia_crypto::verify(&self.sender_pubkey, &canonical, &sig).map_err(|e| match e {
             ArxiaError::InvalidKey(_) => SignedGossipMessageError::InvalidPublicKey,
             _ => SignedGossipMessageError::SignatureInvalid,
-        })
+        })?;
+
+        // Post-Quantum ML-DSA-65 verification
+        if let (Some(pq_pub), Some(pq_sig)) = (&self.pq_public_key, &self.pq_signature) {
+            use ml_dsa::{MlDsa65, VerifyingKey, Signature, EncodedVerifyingKey, EncodedSignature};
+            use ml_dsa::signature::Verifier as PqVerify;
+            
+            let encoded_key = EncodedVerifyingKey::<MlDsa65>::try_from(pq_pub.as_slice())
+                .map_err(|_| SignedGossipMessageError::InvalidPqPublicKey)?;
+            let pq_vk = VerifyingKey::<MlDsa65>::decode(&encoded_key);
+            
+            let encoded_sig = EncodedSignature::<MlDsa65>::try_from(pq_sig.as_slice())
+                .map_err(|_| SignedGossipMessageError::InvalidPqSignatureLength)?;
+            let sig = Signature::<MlDsa65>::decode(&encoded_sig)
+                .ok_or_else(|| SignedGossipMessageError::PqSignatureInvalid)?;
+                
+            PqVerify::verify(&pq_vk, &canonical, &sig)
+                .map_err(|_| SignedGossipMessageError::PqSignatureInvalid)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -224,8 +257,26 @@ fn estimate_message_size(m: &GossipMessage) -> usize {
         GossipMessage::NonceSyncRequest { from } => 1 + 8 + from.len(),
         GossipMessage::NonceSyncResponse { entries } => 1 + 8 + entries.len() * (32 + 8 + 32),
         GossipMessage::Ping { node_id, .. } => 1 + 8 + 8 + node_id.len(),
-        GossipMessage::ValidatorVote { block_hash, voter_pubkey, signature, .. } => {
-            1 + 8 + block_hash.len() + 8 + voter_pubkey.len() + 8 + 8 + 8 + signature.len()
+        GossipMessage::ValidatorVote {
+            block_hash,
+            voter_pubkey,
+            signature,
+            pq_public_key,
+            pq_signature,
+            ..
+        } => {
+            let mut sz = 1 + 8 + block_hash.len() + 8 + voter_pubkey.len() + 8 + 8 + 8 + signature.len();
+            if let Some(ref pk) = pq_public_key {
+                sz += 8 + pk.len();
+            } else {
+                sz += 8;
+            }
+            if let Some(ref sig) = pq_signature {
+                sz += 8 + sig.len();
+            } else {
+                sz += 8;
+            }
+            sz
         }
     }
 }
@@ -265,6 +316,8 @@ fn encode_message_into(buf: &mut Vec<u8>, m: &GossipMessage) {
             delegated_stake,
             nonce,
             signature,
+            pq_public_key,
+            pq_signature,
         } => {
             buf.push(variant_tag::VALIDATOR_VOTE);
             buf.extend_from_slice(&(block_hash.len() as u64).to_be_bytes());
@@ -275,6 +328,18 @@ fn encode_message_into(buf: &mut Vec<u8>, m: &GossipMessage) {
             buf.extend_from_slice(&nonce.to_be_bytes());
             buf.extend_from_slice(&(signature.len() as u64).to_be_bytes());
             buf.extend_from_slice(signature.as_bytes());
+            if let Some(ref pk) = pq_public_key {
+                buf.extend_from_slice(&(pk.len() as u64).to_be_bytes());
+                buf.extend_from_slice(pk.as_bytes());
+            } else {
+                buf.extend_from_slice(&0u64.to_be_bytes());
+            }
+            if let Some(ref sig) = pq_signature {
+                buf.extend_from_slice(&(sig.len() as u64).to_be_bytes());
+                buf.extend_from_slice(sig.as_bytes());
+            } else {
+                buf.extend_from_slice(&0u64.to_be_bytes());
+            }
         }
     }
 }
@@ -296,6 +361,8 @@ mod tests {
                 message,
                 sender_pubkey: pk,
                 signature: sig.to_vec(),
+                pq_public_key: None,
+                pq_signature: None,
             },
             pk,
         )
@@ -352,6 +419,8 @@ mod tests {
             delegated_stake: 1_000_000,
             nonce: 1,
             signature: "cc".repeat(64),
+            pq_public_key: None,
+            pq_signature: None,
         }
     }
 
@@ -561,6 +630,8 @@ mod tests {
             message: m,
             sender_pubkey: pk,
             signature: sig_no_domain.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         assert_eq!(s.verify(), Err(SignedGossipMessageError::SignatureInvalid));
     }
@@ -582,6 +653,8 @@ mod tests {
             message: m,
             sender_pubkey: pk,
             signature: sig_other.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         assert_eq!(s.verify(), Err(SignedGossipMessageError::SignatureInvalid));
     }
@@ -626,6 +699,8 @@ mod tests {
             message: oversized,
             sender_pubkey: pk,
             signature: sig.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
 
         let err = s.verify().unwrap_err();
@@ -660,6 +735,8 @@ mod tests {
             message: max_size,
             sender_pubkey: pk,
             signature: sig.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         let msg = "envelope at exactly MAX_BLOCK_ANNOUNCE_BYTES must verify".to_string();
         assert!(
@@ -681,6 +758,8 @@ mod tests {
             message: oversized,
             sender_pubkey: [0xAAu8; 32], // arbitrary; would fail crypto
             signature: vec![0u8; 64],    // zero sig; would fail crypto
+            pq_public_key: None,
+            pq_signature: None,
         };
         let err = s.verify().unwrap_err();
         let matched = matches!(
@@ -716,6 +795,8 @@ mod tests {
             message: oversized,
             sender_pubkey: pk,
             signature: sig.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
 
         let err = s.verify().unwrap_err();
@@ -750,6 +831,8 @@ mod tests {
             message: max_size,
             sender_pubkey: pk,
             signature: sig.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         let msg = "envelope at exactly MAX_NONCE_SYNC_RESPONSE_ENTRIES must verify".to_string();
         assert!(
@@ -776,6 +859,8 @@ mod tests {
                 message: ping("n", 1),
                 sender_pubkey: candidate,
                 signature: vec![0u8; 64],
+                pq_public_key: None,
+                pq_signature: None,
             };
             assert_eq!(
                 s.verify(),
@@ -799,6 +884,8 @@ mod tests {
             message: oversized,
             sender_pubkey: [0xAAu8; 32], // arbitrary; would fail crypto
             signature: vec![0u8; 64],    // zero sig; would fail crypto
+            pq_public_key: None,
+            pq_signature: None,
         };
         let err = s.verify().unwrap_err();
         let matched = matches!(
@@ -809,5 +896,43 @@ mod tests {
         );
         let msg = format!("size check must run before crypto; got {:?}", err);
         assert!(matched, "{}", msg);
+    }
+
+    #[test]
+    fn test_verify_signed_gossip_message_with_post_quantum_signature() {
+        use ml_dsa::{MlDsa65, SigningKey, Generate, KeyExport};
+        use ml_dsa::signature::{Signer, Keypair, SignatureEncoding};
+        
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let m = ping("n", 1);
+        let canonical = SignedGossipMessage::canonical_bytes(&m, &pk);
+        let sig = sign(&sk, &canonical);
+        
+        let mut s = SignedGossipMessage {
+            message: m,
+            sender_pubkey: pk,
+            signature: sig.to_vec(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        
+        // 1. Classical verification works
+        assert!(s.verify().is_ok());
+        
+        // 2. Add valid PQ signature
+        let pq_sk = SigningKey::<MlDsa65>::generate();
+        let pq_vk = pq_sk.verifying_key();
+        let pq_sig = pq_sk.sign(&canonical);
+        
+        s.pq_public_key = Some(pq_vk.to_bytes().as_slice().to_vec());
+        s.pq_signature = Some(pq_sig.to_bytes().as_slice().to_vec());
+        
+        assert!(s.verify().is_ok());
+        
+        // 3. Tampered PQ signature fails
+        let mut tampered_s = s.clone();
+        tampered_s.pq_signature = Some(vec![0u8; pq_sig.to_bytes().len()]);
+        assert_eq!(tampered_s.verify(), Err(SignedGossipMessageError::PqSignatureInvalid));
     }
 }
