@@ -12,13 +12,15 @@ fn main() {
         .is_ok();
 
     if protoc_available {
-        prost_build::compile_protos(&["proto/arxia.proto"], &["proto/"])
+        prost_build::compile_protos(&["proto/arxia.proto", "proto/transport.proto"], &["proto/"])
             .expect("Failed to compile protobuf definitions");
         println!("cargo:rustc-cfg=arxia_proto_real");
     } else {
         let out_dir = std::env::var("OUT_DIR").unwrap();
-        let dest_path = std::path::Path::new(&out_dir).join("arxia.rs");
-        std::fs::write(&dest_path, "// protoc not found - stub generated\n").unwrap();
+        for stub_file in ["arxia.rs", "arxia.transport.rs"] {
+            let path = std::path::Path::new(&out_dir).join(stub_file);
+            std::fs::write(&path, "// protoc not found - stub generated\n").unwrap();
+        }
         println!("cargo:rustc-cfg=arxia_proto_stub");
         println!("cargo:warning=protoc not found, using stub protobuf module (LOW-008: cfg=arxia_proto_stub set)");
     }
@@ -31,4 +33,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=proto/arxia.proto");
+    println!("cargo:rerun-if-changed=proto/transport.proto");
 }

@@ -61,7 +61,8 @@ pub enum BlockType {
 pub struct Block {
     /// Account public key (hex-encoded Ed25519).
     pub account: String,
-    /// Hash of the previous block (empty for genesis).
+    /// Hash of the previous block (empty for genesis, or network chain-id for
+    /// environment-bound genesis).
     pub previous: String,
     /// The block operation type.
     pub block_type: BlockType,
@@ -75,6 +76,17 @@ pub struct Block {
     pub hash: String,
     /// Ed25519 signature over raw Blake3 hash bytes.
     pub signature: Vec<u8>,
+    /// Network chain-id this block belongs to. Empty string = any /
+    /// backward-compat. When non-empty, included in the hash so
+    /// blocks from different networks have distinct hashes.
+    #[serde(default)]
+    pub network: String,
+    /// Hex-encoded ML-DSA-65 post-quantum public key
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_public_key: Option<String>,
+    /// Hex-encoded ML-DSA-65 post-quantum signature
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_signature: Option<String>,
 }
 
 impl Block {
@@ -97,14 +109,23 @@ impl Block {
         nonce: u64,
         timestamp: u64,
     ) -> Result<String, ArxiaError> {
-        // Defense-in-depth: reject low-order / off-curve account
-        // pubkeys at hash-construction time. The strict verify
-        // path in `validation::verify_block` already enforces this
-        // at signature-check time ; rejecting earlier prevents an
-        // attacker from constructing a Block with a degenerate
-        // pubkey at all (and hence prevents the resulting block
-        // from entering any storage / gossip / persistence path
-        // even before it reaches verify).
+        Self::compute_hash_with_network(account, previous, block_type, balance, nonce, timestamp, "")
+    }
+
+    /// Like [`compute_hash`] but includes a network chain-id in the
+    /// hash input. Empty `network` (default) preserves backward-compat
+    /// with existing blocks. Non-empty `network` produces a distinct
+    /// hash even when all other fields are identical, preventing
+    /// cross-network replay.
+    pub fn compute_hash_with_network(
+        account: &str,
+        previous: &str,
+        block_type: &BlockType,
+        balance: u64,
+        nonce: u64,
+        timestamp: u64,
+        network: &str,
+    ) -> Result<String, ArxiaError> {
         let pubkey_bytes: [u8; 32] = hex::decode(account)
             .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
             .try_into()
@@ -113,8 +134,8 @@ impl Block {
         let bt_json = serde_json::to_string(block_type)
             .map_err(|e| ArxiaError::Serialization(format!("BlockType: {e}")))?;
         let content = format!(
-            "{}:{}:{}:{}:{}:{}",
-            account, previous, bt_json, balance, nonce, timestamp
+            "{}:{}:{}:{}:{}:{}:{}",
+            account, previous, bt_json, balance, nonce, timestamp, network
         );
         Ok(blake3::hash(content.as_bytes()).to_hex().to_string())
     }
@@ -219,6 +240,18 @@ mod tests {
             Ok(())
         }
         assert!(assert_returns_result().is_ok());
+    }
+
+    #[test]
+    fn test_compute_hash_with_network_differs_from_plain() {
+        let pk = valid_pk_hex();
+        let h_plain = Block::compute_hash(&pk, "", &BlockType::Open { initial_balance: 100 }, 100, 1, 42).unwrap();
+        let h_testnet = Block::compute_hash_with_network(&pk, "", &BlockType::Open { initial_balance: 100 }, 100, 1, 42, "testnet").unwrap();
+        let h_mainnet = Block::compute_hash_with_network(&pk, "", &BlockType::Open { initial_balance: 100 }, 100, 1, 42, "mainnet").unwrap();
+        assert_ne!(h_plain, h_testnet, "plain and testnet hashes must differ");
+        assert_ne!(h_testnet, h_mainnet, "testnet and mainnet hashes must differ");
+        assert_eq!(h_plain.len(), 64);
+        assert_eq!(h_testnet.len(), 64);
     }
 
     #[test]

@@ -82,9 +82,6 @@ mod tests {
         // Build the forbidden needle at runtime so this very file
         // does not self-match.
         let needle = concat!("todo", "!(");
-        assert!(
-            !src.contains(needle),
-            "chacha20.rs must not contain a panicking-stub invocation"
-        );
+        assert!(!src.contains(needle), "chacha20.rs must not contain a panicking-stub invocation");
     }
 }

@@ -33,59 +33,34 @@ mod cfg_pin_tests {
 
     #[test]
     fn test_deny_toml_pins_vulnerability_deny() {
-        // PRIMARY LOW-014 PIN for deny.toml: the advisories
-        // policy rejects any dependency with a known RUSTSEC
-        // vulnerability.
-        assert!(
-            DENY_TOML.contains("vulnerability = \"deny\""),
-            "deny.toml must keep `vulnerability = \"deny\"` (LOW-014)"
-        );
+        assert!(DENY_TOML.contains("vulnerability = \"deny\""), "deny.toml must keep `vulnerability = \"deny\"` (LOW-014)");
     }
 
     #[test]
     fn test_deny_toml_pins_unlicensed_deny_and_copyleft_deny() {
-        assert!(
-            DENY_TOML.contains("unlicensed = \"deny\""),
-            "deny.toml must reject unlicensed deps"
-        );
-        assert!(
-            DENY_TOML.contains("copyleft = \"deny\""),
-            "deny.toml must reject copyleft licenses (Arxia is dual-licensed Apache-2.0 / MIT)"
-        );
+        assert!(DENY_TOML.contains("unlicensed = \"deny\""), "deny.toml must reject unlicensed deps");
+        assert!(DENY_TOML.contains("copyleft = \"deny\""), "deny.toml must reject copyleft licenses (Arxia is dual-licensed Apache-2.0 / MIT)");
     }
 
     #[test]
     fn test_deny_toml_pins_wildcards_deny() {
-        assert!(
-            DENY_TOML.contains("wildcards = \"deny\""),
-            "deny.toml must reject wildcard version requirements"
-        );
+        assert!(DENY_TOML.contains("wildcards = \"deny\""), "deny.toml must reject wildcard version requirements");
     }
 
     #[test]
     fn test_deny_toml_pins_unknown_registry_and_git_deny() {
         assert!(DENY_TOML.contains("unknown-registry = \"deny\""));
         assert!(DENY_TOML.contains("unknown-git = \"deny\""));
-        assert!(
-            DENY_TOML.contains("crates.io-index"),
-            "deny.toml must allow crates.io as the only registry"
-        );
+        assert!(DENY_TOML.contains("crates.io-index"), "deny.toml must allow crates.io as the only registry");
     }
 
     #[test]
     fn test_clippy_toml_pins_msrv() {
-        // PRIMARY LOW-014 PIN for clippy.toml.
-        assert!(
-            CLIPPY_TOML.contains("msrv = \"1.85.0\""),
-            "clippy.toml must pin MSRV at 1.85.0 (LOW-014, ESP32 toolchain alignment)"
-        );
+        assert!(CLIPPY_TOML.contains("msrv = \"1.85.0\""), "clippy.toml must pin MSRV at 1.85.0 (LOW-014, ESP32 toolchain alignment)");
     }
 
     #[test]
     fn test_deny_toml_allows_required_licenses() {
-        // The 9 audit-approved licenses must remain in the
-        // allow list. A regression that removes one would
-        // break a downstream dep build.
         for required in &[
             "\"MIT\"",
             "\"Apache-2.0\"",
@@ -97,10 +72,7 @@ mod cfg_pin_tests {
             "\"Zlib\"",
             "\"BSL-1.0\"",
         ] {
-            assert!(
-                DENY_TOML.contains(required),
-                "deny.toml must allow license {required} (LOW-014)"
-            );
+            assert!(DENY_TOML.contains(required), "deny.toml must allow license {required} (LOW-014)");
         }
     }
 
@@ -123,10 +95,7 @@ mod cfg_pin_tests {
         // breaking changes. Reject the pattern at the
         // text-level. The substring matched is the exact
         // wildcard form, so e.g. `"1.0"` does not match.
-        assert!(
-            !WORKSPACE_CARGO_TOML.contains("= \"*\""),
-            "workspace deps must not use wildcard `*` versions (LOW-015)"
-        );
+        assert!(!WORKSPACE_CARGO_TOML.contains("= \"*\""), "workspace deps must not use wildcard `*` versions (LOW-015)");
     }
 
     #[test]
@@ -144,10 +113,7 @@ mod cfg_pin_tests {
             .split("\n[")
             .next()
             .expect("section ends at next [...] header");
-        assert!(
-            !in_workspace_deps.contains("git ="),
-            "workspace.dependencies must not contain git deps (LOW-015)"
-        );
+        assert!(!in_workspace_deps.contains("git ="), "workspace.dependencies must not contain git deps (LOW-015)");
     }
 
     #[test]
@@ -166,10 +132,7 @@ mod cfg_pin_tests {
             ("tokio", "version = \"1.44"),
             ("thiserror", "thiserror = \"2.0"),
         ] {
-            assert!(
-                WORKSPACE_CARGO_TOML.contains(must_contain),
-                "workspace dep {dep_name} must be major.minor pinned (looking for `{must_contain}`)"
-            );
+            assert!(WORKSPACE_CARGO_TOML.contains(must_contain), "workspace dep {dep_name} must be major.minor pinned (looking for `{must_contain}`)");
         }
     }
 
@@ -178,9 +141,6 @@ mod cfg_pin_tests {
         // The audit-acknowledgement comment is part of the
         // documented contract. Removing it (or losing the
         // commit-086 reference) signals a regression.
-        assert!(
-            WORKSPACE_CARGO_TOML.contains("LOW-015"),
-            "workspace Cargo.toml must reference LOW-015 in the deps comment"
-        );
+        assert!(WORKSPACE_CARGO_TOML.contains("LOW-015"), "workspace Cargo.toml must reference LOW-015 in the deps comment");
     }
 }

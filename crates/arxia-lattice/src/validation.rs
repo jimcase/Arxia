@@ -46,6 +46,29 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
     // `verify_strict` (canonical-S enforcement + low-order
     // rejection at the equation level).
     arxia_crypto::verify(&pubkey_bytes, &hash_bytes, &sig_bytes)?;
+
+    // Post-Quantum ML-DSA-65 verification
+    if let (Some(pq_pub_hex), Some(pq_sig_hex)) = (&block.pq_public_key, &block.pq_signature) {
+        use ml_dsa::{MlDsa65, VerifyingKey, Signature, EncodedVerifyingKey, EncodedSignature};
+        use ml_dsa::signature::Verifier as PqVerify;
+        
+        let pq_pub_bytes = hex::decode(pq_pub_hex)
+            .map_err(|e| ArxiaError::InvalidKey(format!("Invalid PQ pubkey hex: {e}")))?;
+        let encoded_key = EncodedVerifyingKey::<MlDsa65>::try_from(pq_pub_bytes.as_slice())
+            .map_err(|e| ArxiaError::InvalidKey(format!("Malformed PQ public key length: {e}")))?;
+        let pq_vk = VerifyingKey::<MlDsa65>::decode(&encoded_key);
+            
+        let pq_sig_bytes = hex::decode(pq_sig_hex)
+            .map_err(|e| ArxiaError::SignatureInvalid(format!("Invalid PQ signature hex: {e}")))?;
+        let encoded_sig = EncodedSignature::<MlDsa65>::try_from(pq_sig_bytes.as_slice())
+            .map_err(|e| ArxiaError::SignatureInvalid(format!("Malformed PQ signature length: {e}")))?;
+        let sig = Signature::<MlDsa65>::decode(&encoded_sig)
+            .ok_or_else(|| ArxiaError::SignatureInvalid("Malformed PQ signature encoding".into()))?;
+            
+        PqVerify::verify(&pq_vk, block.hash.as_bytes(), &sig)
+            .map_err(|e| ArxiaError::SignatureInvalid(format!("PQ signature verify failed: {e}")))?;
+    }
+
     Ok(())
 }
 
@@ -119,6 +142,151 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_chain_integrity_rejects_non_one_genesis_nonce() {
+        let (_sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let bt = BlockType::Open { initial_balance: 0 };
+        let hash = Block::compute_hash(&pk, "", &bt, 0, 0, 0).unwrap();
+        let block = Block {
+            account: pk,
+            previous: String::new(),
+            block_type: bt,
+            balance: 0,
+            nonce: 0,
+            timestamp: 0,
+            hash,
+            signature: vec![],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let result = verify_chain_integrity(&[block]);
+        assert!(matches!(result, Err(ArxiaError::InvalidGenesis(ref msg)) if msg.contains("nonce")));
+    }
+
+    #[test]
+    fn test_verify_chain_integrity_rejects_non_open_genesis() {
+        let (_sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let bt = BlockType::Send { destination: "x".to_string(), amount: 0 };
+        let hash = Block::compute_hash(&pk, "", &bt, 0, 1, 0).unwrap();
+        let block = Block {
+            account: pk,
+            previous: String::new(),
+            block_type: bt,
+            balance: 0,
+            nonce: 1,
+            timestamp: 0,
+            hash,
+            signature: vec![],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let result = verify_chain_integrity(&[block]);
+        assert!(matches!(result, Err(ArxiaError::InvalidGenesis(_))));
+    }
+
+    #[test]
+    fn test_verify_chain_integrity_rejects_genesis_with_previous() {
+        let (_sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let bt = BlockType::Open { initial_balance: 0 };
+        let hash = Block::compute_hash(&pk, "prev", &bt, 0, 1, 0).unwrap();
+        let block = Block {
+            account: pk,
+            previous: "prev".to_string(),
+            block_type: bt,
+            balance: 0,
+            nonce: 1,
+            timestamp: 0,
+            hash,
+            signature: vec![],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let result = verify_chain_integrity(&[block]);
+        assert!(matches!(result, Err(ArxiaError::InvalidGenesis(_))));
+    }
+
+    #[test]
+    fn test_verify_chain_integrity_rejects_nonce_gap() {
+        let (sk, vk) = arxia_crypto::generate_keypair();
+        let account = hex::encode(vk.to_bytes());
+        let bt = BlockType::Open { initial_balance: 1000 };
+        let hash = Block::compute_hash(&account, "", &bt, 1000, 1, 0).unwrap();
+        let hb = hex::decode(&hash).unwrap();
+        let sig = arxia_crypto::sign(&sk, &hb);
+        let genesis = Block {
+            account: account.clone(),
+            previous: String::new(),
+            block_type: bt,
+            balance: 1000,
+            nonce: 1,
+            timestamp: 0,
+            hash,
+            signature: sig.to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let block2 = Block {
+            account,
+            previous: genesis.hash.clone(),
+            block_type: BlockType::Send { destination: "x".into(), amount: 100 },
+            balance: 900,
+            nonce: 3,
+            timestamp: 1,
+            hash: String::new(),
+            signature: vec![],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let result = verify_chain_integrity(&[genesis, block2]);
+        assert!(matches!(result, Err(ArxiaError::NonceGap { index: 1, expected: 2, got: 3 })));
+    }
+
+    #[test]
+    fn test_verify_chain_integrity_rejects_broken_hash_chain() {
+        let (sk, vk) = arxia_crypto::generate_keypair();
+        let account = hex::encode(vk.to_bytes());
+        let bt = BlockType::Open { initial_balance: 1000 };
+        let hash = Block::compute_hash(&account, "", &bt, 1000, 1, 0).unwrap();
+        let hb = hex::decode(&hash).unwrap();
+        let sig = arxia_crypto::sign(&sk, &hb);
+        let genesis = Block {
+            account: account.clone(),
+            previous: String::new(),
+            block_type: bt,
+            balance: 1000,
+            nonce: 1,
+            timestamp: 0,
+            hash,
+            signature: sig.to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let block2 = Block {
+            account,
+            previous: "wrong-previous".to_string(),
+            block_type: BlockType::Send { destination: "x".into(), amount: 100 },
+            balance: 900,
+            nonce: 2,
+            timestamp: 1,
+            hash: String::new(),
+            signature: vec![],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        let result = verify_chain_integrity(&[genesis, block2]);
+        assert!(matches!(result, Err(ArxiaError::HashChainBroken(1))));
+    }
+
+    #[test]
     fn test_verify_block_rejects_tampered_hash() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
@@ -149,43 +317,60 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
+        let msg = "production verify_block must use arxia_crypto::verify, \
+             not dalek lenient vk.verify"
+            .to_string();
         assert!(
             !production.contains("vk.verify("),
-            "production verify_block must use arxia_crypto::verify, \
-             not dalek lenient vk.verify"
+            "{}",
+            msg
         );
+        let msg = "production verify_block must not bypass arxia_crypto via \
+             VerifyingKey::verify either"
+            .to_string();
         assert!(
             !production.contains("verifying_key().verify("),
-            "production verify_block must not bypass arxia_crypto via \
-             VerifyingKey::verify either"
+            "{}",
+            msg
         );
         // Trait-method form bypass guard: a code-toucher could
         // import `Verifier` and call `Verifier::verify(&vk, ...)`
         // or `<VerifyingKey as Verifier>::verify(&vk, ...)`. The
         // earlier two checks would not match this form, so they
         // are extended here.
+        let msg = "production verify_block must not call Verifier::verify directly".to_string();
         assert!(
             !production.contains("Verifier::verify("),
-            "production verify_block must not call Verifier::verify directly"
+            "{}",
+            msg
         );
+        let msg = "production verify_block must not call <VerifyingKey as Verifier>::verify".to_string();
         assert!(
             !production.contains("as Verifier>::verify"),
-            "production verify_block must not call <VerifyingKey as Verifier>::verify"
+            "{}",
+            msg
         );
         // Aliased import bypass guard: forbid bringing dalek's
         // `Verifier` trait into scope at all in production.
+        let msg = "production verify_block must not import ed25519_dalek::Verifier; \
+             route through arxia_crypto::verify instead"
+            .to_string();
         assert!(
             !production.contains("ed25519_dalek::Verifier"),
-            "production verify_block must not import ed25519_dalek::Verifier; \
-             route through arxia_crypto::verify instead"
+            "{}",
+            msg
         );
+        let msg = "production verify_block must route through arxia_crypto::verify".to_string();
         assert!(
             production.contains("arxia_crypto::verify"),
-            "production verify_block must route through arxia_crypto::verify"
+            "{}",
+            msg
         );
+        let msg = "production verify_block must call validate_pubkey_strict at parse time".to_string();
         assert!(
             production.contains("validate_pubkey_strict"),
-            "production verify_block must call validate_pubkey_strict at parse time"
+            "{}",
+            msg
         );
     }
 
@@ -223,8 +408,11 @@ mod tests {
             timestamp: 0,
             hash: String::new(),
             signature: sig_bytes.to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
-        let expected_hash = Block::compute_hash(
+        let result = Block::compute_hash(
             &block_proto.account,
             &block_proto.previous,
             &block_proto.block_type,
@@ -232,23 +420,13 @@ mod tests {
             block_proto.nonce,
             block_proto.timestamp,
         );
-        // compute_hash must itself reject the low-order account
-        // (defense-in-depth). If it did NOT (a future regression),
-        // we still want verify_block to reject the resulting
-        // block at the verify boundary.
-        if let Ok(hash) = expected_hash {
-            let block = Block {
-                hash,
-                ..block_proto
-            };
-            assert!(
-                verify_block(&block).is_err(),
-                "verify_block must reject identity-pubkey forgery"
-            );
-        }
-        // If compute_hash rejected (defense-in-depth fired), that
-        // is also acceptable — the attack didn't reach
-        // verify_block.
+        // compute_hash rejects the low-order account (defense-in-depth).
+        let msg = "compute_hash must reject identity-pubkey account".to_string();
+        assert!(
+            result.is_err(),
+            "{}",
+            msg
+        );
     }
 
     /// E2E pin: a chain whose FIRST block is the identity-pubkey
@@ -275,29 +453,24 @@ mod tests {
             timestamp: 0,
             hash: String::new(),
             signature: sig_bytes.to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
-        let chain: Vec<Block> = match Block::compute_hash(
+        let result = Block::compute_hash(
             &block_proto.account,
             &block_proto.previous,
             &block_proto.block_type,
             block_proto.balance,
             block_proto.nonce,
             block_proto.timestamp,
-        ) {
-            Ok(hash) => vec![Block {
-                hash,
-                ..block_proto
-            }],
-            // Defense-in-depth at compute_hash already fires →
-            // chain construction is impossible. That is the
-            // strongest closure of the attack ; the test path
-            // below is moot.
-            Err(_) => return,
-        };
+        );
+        // compute_hash rejects the low-order account (defense-in-depth).
+        let msg = "compute_hash must reject identity-pubkey account for chain integrity".to_string();
         assert!(
-            verify_chain_integrity(&chain).is_err(),
-            "verify_chain_integrity must reject a chain whose genesis \
-             block is forged under a low-order pubkey"
+            result.is_err(),
+            "{}",
+            msg
         );
     }
 
@@ -332,13 +505,74 @@ mod tests {
             timestamp: 0,
             hash: bogus_hash,
             signature: sig_bytes.to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         let result = verify_block(&block);
-        assert!(
-            result.is_err(),
+        let msg = format!(
             "verify_block must reject a low-order pubkey block at \
              the verify boundary (got {:?})",
             result
         );
+        assert!(
+            result.is_err(),
+            "{}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_verify_block_with_post_quantum_signature() {
+        use ml_dsa::{MlDsa65, SigningKey, Signer, Generate, KeyExport};
+        use ml_dsa::signature::{Keypair, SignatureEncoding};
+        let (sk, vk) = arxia_crypto::generate_keypair();
+        let pk_hex = hex::encode(vk.to_bytes());
+        
+        let mut block = Block {
+            account: pk_hex,
+            previous: String::new(),
+            block_type: BlockType::Open { initial_balance: 100 },
+            balance: 100,
+            nonce: 1,
+            timestamp: 12345,
+            hash: String::new(),
+            signature: Vec::new(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+        block.hash = Block::compute_hash(
+            &block.account,
+            &block.previous,
+            &block.block_type,
+            block.balance,
+            block.nonce,
+            block.timestamp,
+        ).unwrap();
+        
+        let hash_bytes = hex::decode(&block.hash).unwrap();
+        block.signature = arxia_crypto::sign(&sk, &hash_bytes).to_vec();
+        
+        // At this point, classical verification succeeds
+        assert!(verify_block(&block).is_ok());
+        
+        // Generate ML-DSA keypair
+        let pq_sk = SigningKey::<MlDsa65>::generate();
+        let pq_vk = pq_sk.verifying_key();
+        
+        // Sign block.hash with ML-DSA
+        let pq_sig = pq_sk.sign(block.hash.as_bytes());
+        
+        block.pq_public_key = Some(hex::encode(pq_vk.to_bytes()));
+        block.pq_signature = Some(hex::encode(pq_sig.to_bytes()));
+        
+        // 1. Valid hybrid signature should succeed
+        assert!(verify_block(&block).is_ok());
+        
+        // 2. Tampering with the PQ signature should fail
+        let mut tampered_block = block.clone();
+        tampered_block.pq_signature = Some("0".repeat(pq_sig.to_bytes().len() * 2));
+        assert!(verify_block(&tampered_block).is_err());
     }
 }

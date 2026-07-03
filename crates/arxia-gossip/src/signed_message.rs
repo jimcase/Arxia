@@ -514,6 +514,32 @@ mod tests {
         );
     }
 
+    // --- Display impl coverage ---
+
+    #[test]
+    fn test_signed_gossip_message_error_display() {
+        assert_eq!(
+            format!("{}", SignedGossipMessageError::InvalidSignatureLength),
+            "signature must be exactly 64 bytes"
+        );
+        assert_eq!(
+            format!("{}", SignedGossipMessageError::InvalidPublicKey),
+            "sender_pubkey is not a valid Ed25519 public key"
+        );
+        assert_eq!(
+            format!("{}", SignedGossipMessageError::SignatureInvalid),
+            "signature does not verify against the sender pubkey"
+        );
+        use crate::message::MAX_BLOCK_ANNOUNCE_BYTES;
+        let msg_err = MessageError::BlockAnnounceTooLarge {
+            size: 99999,
+            max: MAX_BLOCK_ANNOUNCE_BYTES,
+        };
+        let s = format!("{}", SignedGossipMessageError::MessageInvalid(msg_err));
+        assert!(s.contains("gossip message structurally invalid"));
+        assert!(s.contains("99999"));
+    }
+
     // --- domain separation (CRIT-010 cross-protocol replay) ---
 
     #[test]
@@ -611,10 +637,10 @@ mod tests {
                 assert_eq!(size, MAX_BLOCK_ANNOUNCE_BYTES + 1);
                 assert_eq!(max, MAX_BLOCK_ANNOUNCE_BYTES);
             }
-            other => panic!(
-                "expected MessageInvalid(BlockAnnounceTooLarge), got {:?}",
-                other
-            ),
+            other => {
+                let msg = format!("expected MessageInvalid(BlockAnnounceTooLarge), got {:?}", other);
+                panic!("{}", msg);
+            }
         }
     }
 
@@ -635,9 +661,11 @@ mod tests {
             sender_pubkey: pk,
             signature: sig.to_vec(),
         };
+        let msg = "envelope at exactly MAX_BLOCK_ANNOUNCE_BYTES must verify".to_string();
         assert!(
             s.verify().is_ok(),
-            "envelope at exactly MAX_BLOCK_ANNOUNCE_BYTES must verify"
+            "{}",
+            msg
         );
     }
 
@@ -655,16 +683,14 @@ mod tests {
             signature: vec![0u8; 64],    // zero sig; would fail crypto
         };
         let err = s.verify().unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SignedGossipMessageError::MessageInvalid(
-                    MessageError::BlockAnnounceTooLarge { .. }
-                )
-            ),
-            "size check must run before crypto; got {:?}",
-            err
+        let matched = matches!(
+            err,
+            SignedGossipMessageError::MessageInvalid(
+                MessageError::BlockAnnounceTooLarge { .. }
+            )
         );
+        let msg = format!("size check must run before crypto; got {:?}", err);
+        assert!(matched, "{}", msg);
     }
 
     // --- HIGH-009: oversized NonceSyncResponse rejected before crypto ---
@@ -701,10 +727,10 @@ mod tests {
                 assert_eq!(count, MAX_NONCE_SYNC_RESPONSE_ENTRIES + 1);
                 assert_eq!(max, MAX_NONCE_SYNC_RESPONSE_ENTRIES);
             }
-            other => panic!(
-                "expected MessageInvalid(NonceSyncResponseTooLarge), got {:?}",
-                other
-            ),
+            other => {
+                let msg = format!("expected MessageInvalid(NonceSyncResponseTooLarge), got {:?}", other);
+                panic!("{}", msg);
+            }
         }
     }
 
@@ -725,10 +751,40 @@ mod tests {
             sender_pubkey: pk,
             signature: sig.to_vec(),
         };
+        let msg = "envelope at exactly MAX_NONCE_SYNC_RESPONSE_ENTRIES must verify".to_string();
         assert!(
             s.verify().is_ok(),
-            "envelope at exactly MAX_NONCE_SYNC_RESPONSE_ENTRIES must verify"
+            "{}",
+            msg
         );
+    }
+
+    // --- Line 213: ArxiaError::InvalidKey → InvalidPublicKey ---
+
+    #[test]
+    fn test_verify_rejects_invalid_sender_pubkey_with_invalid_public_key_error() {
+        // Construct a SignedGossipMessage with a garbage sender_pubkey
+        // that ed25519-dalek rejects at parse time. This hits the
+        // ArxiaError::InvalidKey → SignedGossipMessageError::InvalidPublicKey
+        // branch in verify().
+        for b in 0u8..=255u8 {
+            let candidate = [b; 32];
+            if ed25519_dalek::VerifyingKey::from_bytes(&candidate).is_ok() {
+                continue;
+            }
+            let s = SignedGossipMessage {
+                message: ping("n", 1),
+                sender_pubkey: candidate,
+                signature: vec![0u8; 64],
+            };
+            assert_eq!(
+                s.verify(),
+                Err(SignedGossipMessageError::InvalidPublicKey),
+                "verify() with byte={b} must return InvalidPublicKey"
+            );
+            return;
+        }
+        panic!("all 256 byte patterns passed from_bytes — impossible (ed25519-dalek bug?)");
     }
 
     #[test]
@@ -745,15 +801,13 @@ mod tests {
             signature: vec![0u8; 64],    // zero sig; would fail crypto
         };
         let err = s.verify().unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SignedGossipMessageError::MessageInvalid(
-                    MessageError::NonceSyncResponseTooLarge { .. }
-                )
-            ),
-            "size check must run before crypto; got {:?}",
-            err
+        let matched = matches!(
+            err,
+            SignedGossipMessageError::MessageInvalid(
+                MessageError::NonceSyncResponseTooLarge { .. }
+            )
         );
+        let msg = format!("size check must run before crypto; got {:?}", err);
+        assert!(matched, "{}", msg);
     }
 }

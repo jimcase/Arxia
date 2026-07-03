@@ -213,10 +213,7 @@ mod tests {
         let sig_canonical = sign(&sk, &data);
 
         // Sanity check: the canonical signature verifies.
-        assert!(
-            verify(&vk.to_bytes(), &data, &sig_canonical).is_ok(),
-            "canonical signature must pass verify_strict"
-        );
+        assert!(verify(&vk.to_bytes(), &data, &sig_canonical).is_ok(), "canonical signature must pass verify_strict");
 
         // Construct the malleable (non-canonical) version: S' = S + L.
         let s_canonical: [u8; 32] = sig_canonical[32..].try_into().unwrap();
@@ -230,11 +227,7 @@ mod tests {
 
         // verify_strict MUST reject the non-canonical S.
         let result = verify(&vk.to_bytes(), &data, &sig_malleable);
-        assert!(
-            result.is_err(),
-            "verify_strict must reject non-canonical S (S + L = malleable form), got {:?}",
-            result
-        );
+        assert!(result.is_err(), "verify_strict must reject non-canonical S (S + L = malleable form), got {result:?}");
     }
 
     #[test]
@@ -247,10 +240,7 @@ mod tests {
         let data = [0x42u8; 32];
         let dummy_sig = [0u8; 64];
         let result = verify(&zero_pubkey, &data, &dummy_sig);
-        assert!(
-            result.is_err(),
-            "verify must reject the all-zero (identity / low-order) pubkey"
-        );
+        assert!(result.is_err(), "verify must reject the all-zero (identity / low-order) pubkey");
     }
 
     #[test]
@@ -268,10 +258,7 @@ mod tests {
         let data = [0x42u8; 32];
         let dummy_sig = [0u8; 64];
         let result = verify(&low_order_pk, &data, &dummy_sig);
-        assert!(
-            result.is_err(),
-            "verify must reject the known low-order pubkey (order 4 small-subgroup point)"
-        );
+        assert!(result.is_err(), "verify must reject the known low-order pubkey (order 4 small-subgroup point)");
     }
 
     #[test]
@@ -285,11 +272,7 @@ mod tests {
             let (sk, vk) = generate_keypair();
             let data = [i; 32];
             let sig = sign(&sk, &data);
-            assert!(
-                verify(&vk.to_bytes(), &data, &sig).is_ok(),
-                "iteration {} canonical sig must verify",
-                i
-            );
+            assert!(verify(&vk.to_bytes(), &data, &sig).is_ok(), "iteration {i} canonical sig must verify");
         }
     }
 
@@ -301,10 +284,7 @@ mod tests {
         let (_, vk) = generate_keypair();
         let data = [0x42u8; 32];
         let zero_sig: SignatureBytes = [0u8; 64];
-        assert!(
-            verify(&vk.to_bytes(), &data, &zero_sig).is_err(),
-            "verify must reject the all-zero signature"
-        );
+        assert!(verify(&vk.to_bytes(), &data, &zero_sig).is_err(), "verify must reject the all-zero signature");
     }
 
     // ========================================================================
@@ -322,10 +302,7 @@ mod tests {
         // validate_pubkey_strict.
         for _ in 0..16 {
             let (_, vk) = generate_keypair();
-            assert!(
-                validate_pubkey_strict(&vk.to_bytes()).is_ok(),
-                "freshly-generated key must validate"
-            );
+            assert!(validate_pubkey_strict(&vk.to_bytes()).is_ok(), "freshly-generated key must validate");
         }
     }
 
@@ -336,10 +313,7 @@ mod tests {
         // would build a stable DID under an unverifiable key.
         let result = validate_pubkey_strict(&[0u8; 32]);
         let err = result.expect_err("zero pubkey must be rejected");
-        match err {
-            ArxiaError::InvalidKey(_) => {} // expected
-            other => panic!("expected InvalidKey, got {:?}", other),
-        }
+        assert!(matches!(err, ArxiaError::InvalidKey(_)));
     }
 
     #[test]
@@ -355,10 +329,7 @@ mod tests {
         let err = result.expect_err("low-order pubkey must be rejected");
         // Distinguish the two failure modes by message substring.
         let msg = format!("{err}");
-        assert!(
-            msg.contains("low-order") || msg.contains("weak"),
-            "expected low-order/weak diagnostic, got {msg:?}"
-        );
+        assert!(msg.contains("low-order") || msg.contains("weak"), "expected low-order/weak diagnostic, got {msg:?}");
     }
 
     #[test]
@@ -377,10 +348,7 @@ mod tests {
         let result = validate_pubkey_strict(&low_order_pk);
         let err = result.expect_err("validate_pubkey_strict must reject this byte pattern");
         let msg = format!("{err}");
-        assert!(
-            msg.contains("low-order") || msg.contains("weak") || msg.contains("not a valid"),
-            "expected low-order / weak / not-on-curve diagnostic, got {msg:?}"
-        );
+        assert!(msg.contains("low-order") || msg.contains("weak") || msg.contains("not a valid"), "expected low-order / weak / not-on-curve diagnostic, got {msg:?}");
     }
 
     // ============================================================
@@ -404,11 +372,7 @@ mod tests {
         for i in 0..N {
             let (_, vk) = generate_keypair();
             let inserted = seen.insert(vk.to_bytes());
-            assert!(
-                inserted,
-                "iteration {i}: generate_keypair returned a duplicate pubkey {:?}",
-                vk.to_bytes()
-            );
+            assert!(inserted, "iteration {i}: generate_keypair returned a duplicate pubkey {:?}", vk.to_bytes());
         }
         assert_eq!(seen.len(), N);
     }

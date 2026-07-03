@@ -201,6 +201,20 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_mismatch_when_remote_has_unknown_keys() {
+        // Line 105: remote key not in local → mismatches += 1
+        let mut local = NonceRegistry::new();
+        local.insert((acc(1), 5), h(0xAA));
+        let mut remote = NonceRegistry::new();
+        remote.insert((acc(1), 5), h(0xAA)); // same
+        remote.insert((acc(2), 3), h(0xBB)); // remote-only
+        assert_eq!(
+            sync_nonces_before_l1(&local, &remote),
+            SyncResult::Mismatch(1)
+        );
+    }
+
+    #[test]
     fn test_sync_success() {
         let mut local = NonceRegistry::new();
         local.insert((acc(1), 5), h(0xAA));

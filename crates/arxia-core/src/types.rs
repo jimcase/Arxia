@@ -179,10 +179,7 @@ mod tests {
         let t = UNIX_EPOCH + Duration::from_secs(100 * 365 * 24 * 3600);
         let ms = millis_since_epoch_or_zero(t);
         assert!(ms > 0);
-        assert!(
-            ms > 3_000_000_000_000,
-            "100 years should be > 3e12 ms, got {ms}"
-        );
+        assert!(ms > 3_000_000_000_000, "100 years should be > 3e12 ms, got {ms}");
     }
 
     // ============================================================
@@ -203,12 +200,8 @@ mod tests {
         for b in 0x04u8..=0xFEu8 {
             let err =
                 BlockTypeTag::from_byte(b).expect_err(&format!("byte 0x{b:02X} must be rejected"));
-            match err {
-                crate::ArxiaError::InvalidBlockType(got) => {
-                    assert_eq!(got, b, "error must carry the offending byte unchanged");
-                }
-                other => panic!("byte 0x{b:02X} produced unexpected variant: {other:?}"),
-            }
+            let expected_err = crate::ArxiaError::InvalidBlockType(b);
+            assert_eq!(err.to_string(), expected_err.to_string(), "byte 0x{b:02X} must produce InvalidBlockType({b})");
         }
     }
 
@@ -226,11 +219,7 @@ mod tests {
             (0x03, BlockTypeTag::Revoke),
         ];
         for &(b, expected) in valid {
-            assert_eq!(
-                BlockTypeTag::from_byte(b).unwrap(),
-                expected,
-                "byte 0x{b:02X} must round-trip"
-            );
+            assert_eq!(BlockTypeTag::from_byte(b).unwrap(), expected, "byte 0x{b:02X} must round-trip");
         }
     }
 

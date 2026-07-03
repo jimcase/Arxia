@@ -90,4 +90,5 @@ pub const PROTO_STUB_ACTIVE: bool = true;
 #[allow(missing_docs)]
 pub mod arxia {
     include!(concat!(env!("OUT_DIR"), "/arxia.rs"));
+    include!(concat!(env!("OUT_DIR"), "/arxia.transport.rs"));
 }

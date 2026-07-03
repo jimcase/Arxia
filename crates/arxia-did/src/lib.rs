@@ -485,10 +485,8 @@ mod tests {
             .identifier_strict()
             .expect("from_public_key always produces canonical prefix");
         let from_parsed = parsed.identifier();
-        assert_eq!(
-            from_built, from_parsed,
-            "identifier portion must agree across the two types"
-        );
+        let msg = "identifier portion must agree across the two types";
+        assert_eq!(from_built, from_parsed, "{}", msg);
     }
 
     #[test]

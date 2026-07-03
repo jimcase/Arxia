@@ -65,9 +65,6 @@ mod tests {
     fn test_slip39_source_has_no_todo_panic() {
         let src = include_str!("slip39.rs");
         let needle = concat!("todo", "!(");
-        assert!(
-            !src.contains(needle),
-            "slip39.rs must not contain a panicking-stub invocation"
-        );
+        assert!(!src.contains(needle), "slip39.rs must not contain a panicking-stub invocation");
     }
 }

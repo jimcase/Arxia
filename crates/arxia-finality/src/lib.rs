@@ -510,6 +510,7 @@ impl FinalityLatch {
 mod tests {
     use super::*;
     use arxia_crypto::{generate_keypair, sign};
+    use ed25519_dalek::VerifyingKey;
 
     /// Build a SignedConfirmation: returns the confirmation and the
     /// confirmer pubkey for registry insertion.
@@ -785,10 +786,12 @@ mod tests {
             &registry,
         )
         .unwrap();
+        let msg = "phantom validators must not promote to L2".to_string();
         assert_eq!(
             level,
             FinalityLevel::Pending,
-            "phantom validators must not promote to L2"
+            "{}",
+            msg
         );
     }
 
@@ -848,10 +851,12 @@ mod tests {
         let registry = ValidatorRegistry::new();
         let level =
             assess_finality(5_000_000, h, &[c], &SyncResult::Mismatch(0), &[], &registry).unwrap();
+        let msg = "phantom confirmer must not promote to L0".to_string();
         assert_eq!(
             level,
             FinalityLevel::Pending,
-            "phantom confirmer must not promote to L0"
+            "{}",
+            msg
         );
     }
 
@@ -915,10 +920,12 @@ mod tests {
             &registry,
         )
         .unwrap();
+        let msg = "amount == L0_CAP_MICRO_ARX must reach L0 (`<=`)".to_string();
         assert_eq!(
             level,
             FinalityLevel::L0,
-            "amount == L0_CAP_MICRO_ARX must reach L0 (`<=`)"
+            "{}",
+            msg
         );
     }
 
@@ -975,10 +982,12 @@ mod tests {
             &registry,
         )
         .unwrap();
+        let msg = "amount > L0_CAP_MICRO_ARX must NOT reach L0".to_string();
         assert_eq!(
             level,
             FinalityLevel::Pending,
-            "amount > L0_CAP_MICRO_ARX must NOT reach L0"
+            "{}",
+            msg
         );
     }
 
@@ -988,9 +997,11 @@ mod tests {
         // here so changes to `arxia_core::constants` show up
         // as a finality-test failure, not silently shift the
         // L0 boundary in the field.
+        let msg = "L0 cap is 10 ARX in micro-ARX (10 * 1_000_000)".to_string();
         assert_eq!(
             L0_CAP_MICRO_ARX, 10_000_000,
-            "L0 cap is 10 ARX in micro-ARX (10 * 1_000_000)"
+            "{}",
+            msg
         );
     }
 
@@ -1166,10 +1177,12 @@ mod tests {
                 &registry,
             )
             .unwrap();
+        let msg = "HIGH-017: latch must not regress L1 → Pending after sync glitch".to_string();
         assert_eq!(
             level,
             FinalityLevel::L1,
-            "HIGH-017: latch must not regress L1 → Pending after sync glitch"
+            "{}",
+            msg
         );
         assert_eq!(latch.get(&h), Some(FinalityLevel::L1));
     }
@@ -1221,10 +1234,12 @@ mod tests {
                 &registry,
             )
             .unwrap();
+        let msg = "HIGH-017: latch must not regress L2 → Pending after total vote loss".to_string();
         assert_eq!(
             level,
             FinalityLevel::L2,
-            "HIGH-017: latch must not regress L2 → Pending after total vote loss"
+            "{}",
+            msg
         );
     }
 
@@ -1302,6 +1317,156 @@ mod tests {
         assert_eq!(latch.len(), 2);
     }
 
+    // ========================================================================
+    // Display impl coverage
+    // ========================================================================
+
+    #[test]
+    fn test_display_finality_error() {
+        assert_eq!(
+            format!("{}", FinalityError::InvalidSignatureLength),
+            "signature must be exactly 64 bytes"
+        );
+        assert_eq!(
+            format!("{}", FinalityError::InvalidPublicKey),
+            "pubkey is not a valid Ed25519 public key"
+        );
+        assert_eq!(
+            format!("{}", FinalityError::SignatureInvalid),
+            "signature from a registered key does not verify"
+        );
+    }
+
+    #[test]
+    fn test_display_finality_level() {
+        assert_eq!(format!("{}", FinalityLevel::Pending), "PENDING");
+        assert_eq!(format!("{}", FinalityLevel::L0), "L0 (instant)");
+        assert_eq!(format!("{}", FinalityLevel::L1), "L1 (gossip)");
+        assert_eq!(format!("{}", FinalityLevel::L2), "L2 (full)");
+    }
+
+    // ========================================================================
+    // Line 255: ArxiaError::InvalidKey → FinalityError::InvalidPublicKey
+    // (verify_signature error-mapping branch)
+    // ========================================================================
+
+    #[test]
+    fn test_invalid_pubkey_returns_invalid_public_key_error() {
+        // Scan byte values to find a pattern that ed25519-dalek's
+        // VerifyingKey::from_bytes rejects at parse time (triggers
+        // ArxiaError::InvalidKey instead of SignatureInvalid).
+        // ~50% of random 255-bit y-values produce invalid compressed
+        // points; scanning 0..=255 guarantees a hit.
+        for b in 0u8..=255u8 {
+            let candidate = [b; 32];
+            if VerifyingKey::from_bytes(&candidate).is_ok() {
+                continue;
+            }
+            let vote = SignedValidatorVote {
+                validator_pubkey: candidate,
+                block_hash: block_hash_a(),
+                signature: vec![0u8; 64],
+            };
+            let msg = format!("vote.verify() with byte={b} must return InvalidPublicKey");
+            assert_eq!(
+                vote.verify(),
+                Err(FinalityError::InvalidPublicKey),
+                "{}",
+                msg
+            );
+            return;
+        }
+        let msg = "all 256 byte patterns passed from_bytes — this is impossible (ed25519-dalek bug?)".to_string();
+        panic!("{}", msg);
+    }
+
+    #[test]
+    fn test_assess_l2_rejects_registered_validator_with_invalid_pubkey() {
+        // Same through assess_finality — covers the error-mapping line
+        // when verify_signature is called from the L2 vote loop.
+        for b in 0u8..=255u8 {
+            let candidate = [b; 32];
+            if VerifyingKey::from_bytes(&candidate).is_ok() {
+                continue;
+            }
+            let h = block_hash_a();
+            let vote = SignedValidatorVote {
+                validator_pubkey: candidate,
+                block_hash: h,
+                signature: vec![0u8; 64],
+            };
+            let mut registry = ValidatorRegistry::new();
+            registry.insert(candidate, 100);
+            let err = assess_finality(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::NoNeighbors,
+                &[vote],
+                &registry,
+            )
+            .unwrap_err();
+            assert_eq!(err, FinalityError::InvalidPublicKey);
+            return;
+        }
+        let msg = "all 256 byte patterns passed from_bytes".to_string();
+        panic!("{}", msg);
+    }
+
+    // ========================================================================
+    // Additional coverage: is_empty, unregistered validator/confirmer
+    // ========================================================================
+
+    #[test]
+    fn test_validator_registry_is_empty() {
+        let mut r = ValidatorRegistry::new();
+        assert!(r.is_empty());
+        r.insert([0x01u8; 32], 100);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn test_assess_l2_ignores_unregistered_validator_vote() {
+        // Vote has correct block_hash but the validator pubkey is NOT
+        // in the registry. Silently ignored — stays Pending.
+        let h = block_hash_a();
+        let (v, _pk) = make_vote(h);
+        let mut registry = ValidatorRegistry::new();
+        // Register a different validator so total_stake > 0 but the
+        // voting validator is NOT registered.
+        registry.insert([0xFFu8; 32], 100);
+        let level = assess_finality(
+            100_000_000,
+            h,
+            &[],
+            &SyncResult::NoNeighbors,
+            &[v],
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(level, FinalityLevel::Pending);
+    }
+
+    #[test]
+    fn test_assess_l0_ignores_unregistered_confirmer() {
+        // Confirmation has correct block_hash but the confirmer pubkey
+        // is NOT in the registry. Silently ignored — stays Pending.
+        let h = block_hash_a();
+        let (c, _pk) = make_confirmation(h);
+        let mut registry = ValidatorRegistry::new();
+        registry.insert([0xFEu8; 32], 1); // different confirmer
+        let level = assess_finality(
+            5_000_000,
+            h,
+            &[c],
+            &SyncResult::Mismatch(0),
+            &[],
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(level, FinalityLevel::Pending);
+    }
+
     #[test]
     fn test_latch_propagates_signature_error_without_updating() {
         // If assess_finality returns Err (a registered validator's
@@ -1334,10 +1499,12 @@ mod tests {
         );
         assert!(result.is_err());
         // Latched value is still L1 from phase 1.
+        let msg = "errors must not corrupt the latch state".to_string();
         assert_eq!(
             latch.get(&h),
             Some(FinalityLevel::L1),
-            "errors must not corrupt the latch state"
+            "{}",
+            msg
         );
     }
 }

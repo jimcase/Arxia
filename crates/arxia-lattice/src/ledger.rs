@@ -316,10 +316,11 @@ mod tests {
         let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature[0] ^= 0xFF;
         let result = ledger.add_block(block);
+        let fmt_msg = format!("expected SignatureInvalid, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::SignatureInvalid(_))),
-            "expected SignatureInvalid, got {:?}",
-            result
+            "{}",
+            fmt_msg
         );
         assert!(ledger.get_chain(alice.id()).is_none());
     }
@@ -336,15 +337,17 @@ mod tests {
         // The hash now no longer matches the account field baked into the
         // Blake3 input, so verify_block catches it on HashMismatch first.
         let result = ledger.add_block(block);
+        let ok = matches!(
+            result,
+            Err(ArxiaError::HashMismatch)
+                | Err(ArxiaError::SignatureInvalid(_))
+                | Err(ArxiaError::InvalidKey(_))
+        );
+        let fmt_msg = format!("expected verification failure, got {:?}", result);
         assert!(
-            matches!(
-                result,
-                Err(ArxiaError::HashMismatch)
-                    | Err(ArxiaError::SignatureInvalid(_))
-                    | Err(ArxiaError::InvalidKey(_))
-            ),
-            "expected verification failure, got {:?}",
-            result
+            ok,
+            "{}",
+            fmt_msg
         );
         assert!(ledger.get_chain(bob.id()).is_none());
     }
@@ -408,6 +411,9 @@ mod tests {
             timestamp,
             hash,
             signature: signature.to_bytes().to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         }
     }
 
@@ -439,22 +445,26 @@ mod tests {
             },
         );
         let result = ledger.add_block(forged);
-        assert!(
-            matches!(
-                result,
-                Err(ArxiaError::NonceGap {
-                    expected: 3,
-                    got: 5,
-                    ..
-                })
-            ),
-            "expected NonceGap{{expected:3, got:5}}, got {:?}",
-            result
+        let ok = matches!(
+            result,
+            Err(ArxiaError::NonceGap {
+                expected: 3,
+                got: 5,
+                ..
+            })
         );
+        let fmt_msg = format!("expected NonceGap{{expected:3, got:5}}, got {:?}", result);
+        assert!(
+            ok,
+            "{}",
+            fmt_msg
+        );
+        let fmt_msg2 = "chain must not have grown";
         assert_eq!(
             ledger.get_chain(alice.id()).unwrap().len(),
             2,
-            "chain must not have grown"
+            "{}",
+            fmt_msg2
         );
     }
 
@@ -487,10 +497,11 @@ mod tests {
             },
         );
         let result = ledger.add_block(forged);
+        let fmt_msg = format!("expected HashChainBroken(2), got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HashChainBroken(2))),
-            "expected HashChainBroken(2), got {:?}",
-            result
+            "{}",
+            fmt_msg
         );
         assert_eq!(ledger.get_chain(alice.id()).unwrap().len(), 2);
     }
@@ -522,17 +533,19 @@ mod tests {
         assert_ne!(send_carol.hash, send_bob.hash);
 
         let result = ledger.add_block(send_carol);
+        let ok = matches!(
+            result,
+            Err(ArxiaError::NonceGap {
+                expected: 3,
+                got: 2,
+                ..
+            })
+        );
+        let fmt_msg = format!("expected NonceGap{{expected:3, got:2}}, got {:?}", result);
         assert!(
-            matches!(
-                result,
-                Err(ArxiaError::NonceGap {
-                    expected: 3,
-                    got: 2,
-                    ..
-                })
-            ),
-            "expected NonceGap{{expected:3, got:2}}, got {:?}",
-            result
+            ok,
+            "{}",
+            fmt_msg
         );
         assert_eq!(ledger.get_chain(alice.id()).unwrap().len(), 2);
     }
@@ -566,10 +579,11 @@ mod tests {
             },
         );
         let result = ledger.add_block(forged_send_genesis);
+        let fmt_msg = format!("expected InvalidGenesis (variant check), got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::InvalidGenesis(_))),
-            "expected InvalidGenesis (variant check), got {:?}",
-            result
+            "{}",
+            fmt_msg
         );
     }
 
@@ -590,17 +604,19 @@ mod tests {
             },
         );
         let result = ledger.add_block(forged_high_nonce_open);
+        let ok = matches!(
+            result,
+            Err(ArxiaError::NonceGap {
+                expected: 1,
+                got: 5,
+                ..
+            })
+        );
+        let fmt_msg = format!("expected NonceGap{{expected:1, got:5}}, got {:?}", result);
         assert!(
-            matches!(
-                result,
-                Err(ArxiaError::NonceGap {
-                    expected: 1,
-                    got: 5,
-                    ..
-                })
-            ),
-            "expected NonceGap{{expected:1, got:5}}, got {:?}",
-            result
+            ok,
+            "{}",
+            fmt_msg
         );
     }
 
@@ -680,14 +696,16 @@ mod tests {
         );
 
         let result = ledger.add_block(phantom_receive);
+        let matched = matches!(
+            result,
+            Err(ArxiaError::UnknownSourceSend { ref source_hash })
+                if source_hash == &phantom_source
+        );
+        let fmt_msg = format!("expected UnknownSourceSend, got {:?}", result);
         assert!(
-            matches!(
-                result,
-                Err(ArxiaError::UnknownSourceSend { ref source_hash })
-                    if source_hash == &phantom_source
-            ),
-            "expected UnknownSourceSend, got {:?}",
-            result
+            matched,
+            "{}",
+            fmt_msg
         );
         // Bob's chain stays at length 1 (just the open).
         assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 1);
@@ -725,10 +743,11 @@ mod tests {
         );
 
         let result = ledger.add_block(stolen_receive);
+        let fmt_msg = format!("expected WrongDestination, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::WrongDestination)),
-            "expected WrongDestination, got {:?}",
-            result
+            "{}",
+            fmt_msg
         );
         // Carol's chain stays at length 1 ; the legitimate Send was
         // already credited and is still in the index awaiting Bob.
@@ -773,14 +792,16 @@ mod tests {
         );
 
         let result = ledger.add_block(double_receive);
+        let matched = matches!(
+            result,
+            Err(ArxiaError::DuplicateReceive { ref source_hash })
+                if source_hash == &alice_send.hash
+        );
+        let fmt_msg = format!("expected DuplicateReceive, got {:?}", result);
         assert!(
-            matches!(
-                result,
-                Err(ArxiaError::DuplicateReceive { ref source_hash })
-                    if source_hash == &alice_send.hash
-            ),
-            "expected DuplicateReceive, got {:?}",
-            result
+            matched,
+            "{}",
+            fmt_msg
         );
         // Bob's chain stays at length 2.
         assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 2);
@@ -829,10 +850,12 @@ mod tests {
         let supply_before = ledger.total_supply();
         ledger.add_block(send).unwrap();
         ledger.add_block(recv).unwrap();
+        let fmt_msg = "send + receive must not change total supply";
         assert_eq!(
             ledger.total_supply(),
             supply_before,
-            "send + receive must not change total supply"
+            "{}",
+            fmt_msg
         );
     }
 
@@ -872,15 +895,20 @@ mod tests {
         let mut overflow_acct = AccountChain::new();
         let overflow_open = overflow_acct.open(1, &mut vc).unwrap();
         let result = ledger.add_block(overflow_open);
-        assert!(
-            matches!(
-                result,
-                Err(ArxiaError::SupplyCapExceeded { requested, max })
-                    if requested == arxia_core::TOTAL_SUPPLY_MICRO_ARX + 1
-                        && max == arxia_core::TOTAL_SUPPLY_MICRO_ARX
-            ),
+        let matched = matches!(
+            result,
+            Err(ArxiaError::SupplyCapExceeded { requested, max })
+                if requested == arxia_core::TOTAL_SUPPLY_MICRO_ARX + 1
+                    && max == arxia_core::TOTAL_SUPPLY_MICRO_ARX
+        );
+        let fmt_msg = format!(
             "expected SupplyCapExceeded against TOTAL_SUPPLY ceiling, got {:?}",
             result
+        );
+        assert!(
+            matched,
+            "{}",
+            fmt_msg
         );
         // Total supply is unchanged after the rejected Open.
         assert_eq!(ledger.total_supply(), arxia_core::TOTAL_SUPPLY_MICRO_ARX);
@@ -929,5 +957,70 @@ mod tests {
         let chain_after = ledger.get_chain(alice.id()).unwrap();
         assert_eq!(chain_after.len(), chain_len_before);
         assert_eq!(chain_after.last().unwrap().hash, last_hash_before);
+    }
+
+    #[test]
+    fn test_add_block_rejects_genesis_with_non_empty_previous() {
+        let mut ledger = Ledger::new();
+        let alice = AccountChain::new();
+        let forged = forge_block_with_previous(
+            &alice,
+            "non-empty".to_string(),
+            1,
+            1_000_000,
+            BlockType::Open {
+                initial_balance: 1_000_000,
+            },
+        );
+        let result = ledger.add_block(forged);
+        let matched = matches!(
+            result,
+            Err(ArxiaError::InvalidGenesis(ref m))
+                if m == "genesis must have empty previous"
+        );
+        let fmt_msg = format!("expected InvalidGenesis about empty previous, got {:?}", result);
+        assert!(
+            matched,
+            "{}",
+            fmt_msg
+        );
+    }
+
+    #[test]
+    fn test_add_block_accepts_revoke() {
+        let mut ledger = Ledger::new();
+        let alice = AccountChain::new();
+
+        let genesis = forge_block_with_previous(
+            &alice,
+            String::new(),
+            1,
+            1_000_000,
+            BlockType::Open {
+                initial_balance: 1_000_000,
+            },
+        );
+        ledger.add_block(genesis.clone()).unwrap();
+
+        let revoke = forge_block_with_previous(
+            &alice,
+            genesis.hash.clone(),
+            2,
+            1_000_000,
+            BlockType::Revoke {
+                credential_hash: "cred-hash".to_string(),
+            },
+        );
+        let result = ledger.add_block(revoke);
+        assert!(result.is_ok(), "expected Revoke to be accepted, got {:?}", result);
+        assert_eq!(ledger.get_chain(alice.id()).unwrap().len(), 2);
+        assert_eq!(ledger.total_supply(), 1_000_000);
+    }
+
+    #[test]
+    fn test_ledger_default() {
+        let ledger = Ledger::default();
+        assert!(ledger.chains.is_empty());
+        assert_eq!(ledger.total_supply(), 0);
     }
 }

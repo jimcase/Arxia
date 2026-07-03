@@ -21,6 +21,7 @@ message GossipEnvelope {
     NonceSyncRequest nonce_sync_request = 2;
     NonceSyncResponse nonce_sync_response = 3;
     Ping ping = 4;
+    Vote vote = 5;
   }
 }
 

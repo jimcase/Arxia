@@ -41,3 +41,45 @@ impl std::fmt::Display for Unimplemented {
 }
 
 impl std::error::Error for Unimplemented {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unimplemented_display() {
+        assert_eq!(
+            format!("{}", Unimplemented),
+            "feature not implemented; reserved for a future milestone"
+        );
+    }
+
+    #[test]
+    fn test_unimplemented_debug() {
+        assert_eq!(format!("{:?}", Unimplemented), "Unimplemented");
+    }
+
+    #[test]
+    fn test_unimplemented_implements_error() {
+        let err: &dyn std::error::Error = &Unimplemented;
+        assert_eq!(
+            err.to_string(),
+            "feature not implemented; reserved for a future milestone"
+        );
+    }
+
+    #[test]
+    fn test_unimplemented_clone_eq() {
+        let a = Unimplemented;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_unimplemented_copy() {
+        let a = Unimplemented;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+    }
+}

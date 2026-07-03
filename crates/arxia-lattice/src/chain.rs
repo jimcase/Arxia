@@ -182,6 +182,19 @@ impl AccountChain {
         initial_balance: u64,
         vclock: &mut VectorClock,
     ) -> Result<Block, ArxiaError> {
+        self.open_with_network(initial_balance, vclock, "")
+    }
+
+    /// Open an account with an initial balance and a network chain-id.
+    /// When `network` is non-empty, the genesis hash is distinct per
+    /// network (prevents cross-network replay). Empty string is
+    /// backward-compatible with existing blocks.
+    pub fn open_with_network(
+        &mut self,
+        initial_balance: u64,
+        vclock: &mut VectorClock,
+        network: &str,
+    ) -> Result<Block, ArxiaError> {
         if !self.chain.is_empty() {
             return Err(ArxiaError::AccountAlreadyOpen);
         }
@@ -206,13 +219,14 @@ impl AccountChain {
         self.nonce = 1;
         let timestamp = arxia_core::now_millis();
         let block_type = BlockType::Open { initial_balance };
-        let hash = Block::compute_hash(
+        let hash = Block::compute_hash_with_network(
             &self.public_key_hex,
             "",
             &block_type,
             self.balance,
             self.nonce,
             timestamp,
+            network,
         )?;
         // CRITICAL: sign raw Blake3 bytes (32 bytes), NOT hex string
         // MED-002 (commit 055): typed-error on internal hex
@@ -233,6 +247,9 @@ impl AccountChain {
             timestamp,
             hash,
             signature: signature.to_bytes().to_vec(),
+            network: network.to_string(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         self.chain.push(block.clone());
         Ok(block)
@@ -313,6 +330,9 @@ impl AccountChain {
             timestamp,
             hash,
             signature: signature.to_bytes().to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         self.chain.push(block.clone());
         Ok(block)
@@ -417,6 +437,9 @@ impl AccountChain {
             timestamp,
             hash,
             signature: signature.to_bytes().to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         self.chain.push(block.clone());
         self.consumed_sources.insert(send_block.hash.clone());
@@ -460,6 +483,9 @@ impl AccountChain {
             timestamp,
             hash,
             signature: signature.to_bytes().to_vec(),
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         self.chain.push(block.clone());
         Ok(block)
@@ -622,10 +648,11 @@ mod tests {
         let mut chain = AccountChain::new();
         chain.open(1_000_000, &mut vc).unwrap();
         let err = chain.open(1, &mut vc).unwrap_err();
+        let fmt_msg = format!("expected AccountAlreadyOpen, got {:?}", err);
         assert!(
             matches!(err, ArxiaError::AccountAlreadyOpen),
-            "expected AccountAlreadyOpen, got {:?}",
-            err
+            "{}",
+            fmt_msg
         );
     }
 
@@ -894,10 +921,12 @@ mod tests {
         assert_eq!(bob.chain.len(), pre_chain_len, "chain must be untouched");
         // vclock must NOT have ticked for Bob's shard on the overflow path.
         let bob_sid = bob.id()[..8].to_string();
+        let fmt_msg = "vclock must not tick on a rejected receive";
         assert_eq!(
             vc.clocks.get(&bob_sid),
             pre_vc_clocks.get(&bob_sid),
-            "vclock must not tick on a rejected receive"
+            "{}",
+            fmt_msg
         );
     }
 
@@ -935,6 +964,10 @@ mod tests {
         bob.balance = arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT - 100;
         let send = alice.send(bob.id(), 101, &mut vc).unwrap();
         let result = bob.receive(&send, &mut vc);
+        let fmt_msg = format!(
+            "expected SupplyCapExceeded at cap+1, got {:?}",
+            result
+        );
         assert!(
             matches!(
                 result,
@@ -942,8 +975,8 @@ mod tests {
                     if requested == arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT + 1
                         && max == arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT
             ),
-            "expected SupplyCapExceeded at cap+1, got {:?}",
-            result
+            "{}",
+            fmt_msg
         );
     }
 
@@ -996,20 +1029,26 @@ mod tests {
         // because `alice.send(alice.id(), ...)` would cross-borrow.
         let alice_id = alice.id().to_string();
         let result = alice.send(&alice_id, 100, &mut vc);
-        assert!(
-            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+        let fmt_msg = format!(
             "self-send must be rejected with SelfSendNotAllowed, got {:?}",
             result
+        );
+        assert!(
+            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+            "{}",
+            fmt_msg
         );
 
         // No state was mutated (the rejection fires BEFORE any tick /
         // balance update / nonce increment / chain push).
         assert_eq!(alice.nonce, nonce_before, "nonce must not change");
         assert_eq!(alice.balance, balance_before, "balance must not change");
+        let fmt_msg = "chain must not gain a block";
         assert_eq!(
             alice.chain.len(),
             chain_len_before,
-            "chain must not gain a block"
+            "{}",
+            fmt_msg
         );
     }
 
@@ -1026,10 +1065,14 @@ mod tests {
 
         let alice_id = alice.id().to_string();
         let result = alice.send(&alice_id, 1_000_000, &mut vc);
-        assert!(
-            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+        let fmt_msg = format!(
             "structural self-send check must take priority over balance, got {:?}",
             result
+        );
+        assert!(
+            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+            "{}",
+            fmt_msg
         );
     }
 
@@ -1047,10 +1090,14 @@ mod tests {
         // The earlier check (ZeroAmount) wins.
         let alice_id = alice.id().to_string();
         let result = alice.send(&alice_id, 0, &mut vc);
-        assert!(
-            matches!(result, Err(ArxiaError::ZeroAmount)),
+        let fmt_msg = format!(
             "ZeroAmount must take priority over SelfSendNotAllowed when both apply, got {:?}",
             result
+        );
+        assert!(
+            matches!(result, Err(ArxiaError::ZeroAmount)),
+            "{}",
+            fmt_msg
         );
     }
 
@@ -1097,9 +1144,11 @@ mod tests {
         // Self-check must NOT fire. The send proceeds and either
         // succeeds or fails the balance check; either way, NOT
         // SelfSendNotAllowed.
+        let fmt_msg = "destination one byte different from self must not trigger SelfSendNotAllowed";
         assert!(
             !matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
-            "destination one byte different from self must not trigger SelfSendNotAllowed"
+            "{}",
+            fmt_msg
         );
     }
 
@@ -1129,10 +1178,12 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
+        let fmt_msg = "MED-002: production code must use `?` propagation \
+             for internal hex::decode failures";
         assert!(
             !production.contains(".expect(\"valid hex hash\")"),
-            "MED-002: production code must use `?` propagation \
-             for internal hex::decode failures"
+            "{}",
+            fmt_msg
         );
     }
 
@@ -1197,10 +1248,12 @@ mod tests {
         // Try to add an extra new node — should be silently
         // dropped.
         vc.tick("n-new-node");
+        let fmt_msg = "tick must NOT add a new entry beyond MAX";
         assert_eq!(
             vc.clocks.len(),
             arxia_core::MAX_VECTOR_CLOCK_ENTRIES,
-            "tick must NOT add a new entry beyond MAX"
+            "{}",
+            fmt_msg
         );
         assert!(!vc.clocks.contains_key("n-new-node"));
         // Existing entries can still tick.
@@ -1224,10 +1277,12 @@ mod tests {
             b.tick(&format!("b-{i:04}"));
         }
         a.merge(&b);
+        let fmt_msg = "merge must NOT exceed MAX";
         assert_eq!(
             a.clocks.len(),
             arxia_core::MAX_VECTOR_CLOCK_ENTRIES,
-            "merge must NOT exceed MAX"
+            "{}",
+            fmt_msg
         );
         for i in 0..5 {
             assert!(!a.clocks.contains_key(&format!("b-{i:04}")));
@@ -1305,10 +1360,122 @@ mod tests {
         // short_ids (with 1 - 1/2^32 ≈ 1.0 probability).
         let alice = AccountChain::new();
         let bob = AccountChain::new();
+        let fmt_msg = "two random pubkeys collide on first 8 hex chars (≈ 1 in 4 billion)";
         assert_ne!(
             alice.short_id(),
             bob.short_id(),
-            "two random pubkeys collide on first 8 hex chars (≈ 1 in 4 billion)"
+            "{}",
+            fmt_msg
         );
+    }
+
+    #[test]
+    fn test_vector_clock_default() {
+        let vc: VectorClock = Default::default();
+        assert!(vc.clocks.is_empty());
+    }
+
+    #[test]
+    fn test_vector_clock_happened_before_empty_self() {
+        let vc1 = VectorClock::new();
+        let mut vc2 = VectorClock::new();
+        vc2.tick("a");
+        // vc1={} vs vc2={"a":1}: first loop empty, second loop finds
+        // "a"=1 not in self → at_least_one_less = true
+        assert!(vc1.happened_before(&vc2));
+    }
+
+    #[test]
+    fn test_verifying_key_accessor() {
+        let chain = AccountChain::new();
+        let vk = chain.verifying_key();
+        assert_eq!(vk.to_bytes(), chain.verifying_key.to_bytes());
+    }
+
+    #[test]
+    fn test_receive_rejects_non_send_block() {
+        let mut vc = VectorClock::new();
+        let mut bob = AccountChain::new();
+        bob.open(0, &mut vc).unwrap();
+
+        let (_sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let open_block = Block {
+            account: pk,
+            previous: String::new(),
+            block_type: BlockType::Open { initial_balance: 100 },
+            balance: 100,
+            nonce: 1,
+            timestamp: 0,
+            hash: "0".repeat(64),
+            signature: vec![0u8; 64],
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
+        };
+
+        let err = bob.receive(&open_block, &mut vc).unwrap_err();
+        assert!(matches!(err, ArxiaError::NotSendBlock));
+    }
+
+    #[test]
+    fn test_from_key_and_blocks_empty_chain() {
+        let (sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let chain = AccountChain::from_key_and_blocks(sk, vec![]);
+        assert_eq!(chain.public_key_hex, pk);
+        assert!(chain.chain.is_empty());
+        assert_eq!(chain.balance, 0);
+        assert_eq!(chain.nonce, 0);
+        assert!(chain.consumed_sources.is_empty());
+    }
+
+    #[test]
+    fn test_from_key_and_blocks_with_receive_blocks() {
+        let (sk, vk) = arxia_crypto::generate_keypair();
+        let pk = hex::encode(vk.to_bytes());
+        let blocks = vec![
+            Block {
+                account: pk.clone(),
+                previous: String::new(),
+                block_type: BlockType::Open { initial_balance: 1000 },
+                balance: 1000,
+                nonce: 1,
+                timestamp: 0,
+                hash: "a".repeat(64),
+                signature: vec![0u8; 64],
+                network: String::new(),
+                pq_public_key: None,
+                pq_signature: None,
+            },
+            Block {
+                account: pk.clone(),
+                previous: "a".repeat(64),
+                block_type: BlockType::Receive {
+                    source_hash: "src1".to_string(),
+                },
+                balance: 1200,
+                nonce: 2,
+                timestamp: 1,
+                hash: "b".repeat(64),
+                signature: vec![0u8; 64],
+                network: String::new(),
+                pq_public_key: None,
+                pq_signature: None,
+            },
+        ];
+        let chain = AccountChain::from_key_and_blocks(sk, blocks);
+        assert_eq!(chain.balance, 1200);
+        assert_eq!(chain.nonce, 2);
+        assert_eq!(chain.chain.len(), 2);
+        assert!(chain.consumed_sources.contains("src1"));
+    }
+
+    #[test]
+    fn test_account_chain_default() {
+        let chain: AccountChain = Default::default();
+        assert!(chain.chain.is_empty());
+        assert_eq!(chain.balance, 0);
+        assert_eq!(chain.nonce, 0);
     }
 }

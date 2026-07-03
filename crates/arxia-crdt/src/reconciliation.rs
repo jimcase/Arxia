@@ -505,6 +505,9 @@ mod tests {
             timestamp,
             hash,
             signature,
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         };
         // Reflect local state only so subsequent tests can build on top
         // if needed.
@@ -727,6 +730,9 @@ mod tests {
             timestamp,
             hash,
             signature,
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         }
     }
 
@@ -811,6 +817,9 @@ mod tests {
             timestamp,
             hash,
             signature,
+            network: String::new(),
+            pq_public_key: None,
+            pq_signature: None,
         }
     }
 

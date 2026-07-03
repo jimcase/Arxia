@@ -14,7 +14,7 @@
 //!
 //! Caps:
 //!
-//! - [`MAX_BLOCK_ANNOUNCE_BYTES`] = `193 × 64` = `12_352` bytes (HIGH-008
+//! - [`MAX_BLOCK_ANNOUNCE_BYTES`] = `194 × 64` = `12_416` bytes (HIGH-008
 //!   closed in commit 027). 64 compact blocks per announce is the
 //!   batch ceiling — larger announces are gossip-layer abuse, not
 //!   protocol traffic.
@@ -32,12 +32,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Maximum length in bytes of a [`GossipMessage::BlockAnnounce::block_data`]
-/// payload. Computed as `COMPACT_BLOCK_SIZE × MAX_BATCH = 193 × 64`,
+/// payload. Computed as `COMPACT_BLOCK_SIZE × MAX_BATCH = 194 × 64`,
 /// the largest reasonable batch a benign peer would ever announce.
 ///
 /// Anything above this is gossip-layer abuse and is rejected by
 /// [`GossipMessage::validate`] before any signature work runs.
-pub const MAX_BLOCK_ANNOUNCE_BYTES: usize = 193 * 64;
+pub const MAX_BLOCK_ANNOUNCE_BYTES: usize = 194 * 64;
 
 /// Maximum initial value of [`GossipMessage::BlockAnnounce::hops`].
 ///
@@ -255,9 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn test_max_block_announce_bytes_constant_is_12352() {
-        assert_eq!(MAX_BLOCK_ANNOUNCE_BYTES, 12_352);
-        assert_eq!(MAX_BLOCK_ANNOUNCE_BYTES, 193 * 64);
+    fn test_max_block_announce_bytes_constant_is_12416() {
+        assert_eq!(MAX_BLOCK_ANNOUNCE_BYTES, 12_416);
+        assert_eq!(MAX_BLOCK_ANNOUNCE_BYTES, 194 * 64);
     }
 
     #[test]
@@ -267,8 +267,8 @@ mod tests {
 
     #[test]
     fn test_validate_accepts_one_compact_block_announce() {
-        // The realistic single-block case (193 bytes).
-        assert!(block_announce(193).validate().is_ok());
+        // The realistic single-block case (194 bytes).
+        assert!(block_announce(194).validate().is_ok());
     }
 
     #[test]
@@ -387,11 +387,13 @@ mod tests {
             max: MAX_NONCE_SYNC_RESPONSE_ENTRIES,
         };
         let s = format!("{}", e);
-        assert!(s.contains("99999"), "Display should surface count: {}", s);
+        let msg = format!("Display should surface count: {}", s);
+        assert!(s.contains("99999"), "{}", msg);
+        let msg = format!("Display should surface cap: {}", s);
         assert!(
             s.contains(&MAX_NONCE_SYNC_RESPONSE_ENTRIES.to_string()),
-            "Display should surface cap: {}",
-            s
+            "{}",
+            msg
         );
         assert!(s.contains("NonceSyncResponse"));
     }
@@ -403,11 +405,13 @@ mod tests {
             max: MAX_BLOCK_ANNOUNCE_BYTES,
         };
         let s = format!("{}", e);
-        assert!(s.contains("99999"), "Display should surface size: {}", s);
+        let msg = format!("Display should surface size: {}", s);
+        assert!(s.contains("99999"), "{}", msg);
+        let msg = format!("Display should surface cap: {}", s);
         assert!(
             s.contains(&MAX_BLOCK_ANNOUNCE_BYTES.to_string()),
-            "Display should surface cap: {}",
-            s
+            "{}",
+            msg
         );
     }
 
@@ -438,7 +442,10 @@ mod tests {
                 assert_eq!(hops, 255);
                 assert_eq!(max, MAX_BLOCK_ANNOUNCE_HOPS);
             }
-            other => panic!("expected BlockAnnounceHopsExceeded, got {other:?}"),
+            other => {
+                let msg = format!("expected BlockAnnounceHopsExceeded, got {other:?}");
+                panic!("{}", msg);
+            }
         }
     }
 
@@ -476,10 +483,9 @@ mod tests {
             hops: 255,
         };
         let err = m.validate().unwrap_err();
-        assert!(
-            matches!(err, MessageError::BlockAnnounceHopsExceeded { .. }),
-            "expected hops-cap diagnostic first, got {err:?}"
-        );
+        let matched = matches!(err, MessageError::BlockAnnounceHopsExceeded { .. });
+        let msg = format!("expected hops-cap diagnostic first, got {err:?}");
+        assert!(matched, "{}", msg);
     }
 
     #[test]
@@ -511,8 +517,9 @@ mod tests {
             hops: 0,
         };
         assert!(!m.decrement_hops_for_relay());
+        let msg = "no wrap-to-255 on already-zero hops".to_string();
         if let GossipMessage::BlockAnnounce { hops, .. } = &m {
-            assert_eq!(*hops, 0, "no wrap-to-255 on already-zero hops");
+            assert_eq!(*hops, 0, "{}", msg);
         }
     }
 

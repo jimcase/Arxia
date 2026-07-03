@@ -47,10 +47,15 @@ fn signing_key_from_hex(hex_str: &str) -> Result<SigningKey, String> {
 /// }
 /// ```
 ///
+/// # Arguments
+/// - `initial_balance` — balance in micro-ARX
+/// - `network` — chain-id for the genesis block (e.g. "local", "testnet",
+///   "mainnet"), or empty string for backward-compat
+///
 /// # Errors
 /// Returns a JS string error if block construction fails.
 #[wasm_bindgen]
-pub fn create_arxia_wallet(initial_balance: u64) -> Result<String, String> {
+pub fn create_arxia_wallet(initial_balance: u64, network: &str) -> Result<String, String> {
     console_error_panic_hook::set_once();
     let mut vclock = VectorClock::new();
     let mut chain = AccountChain::new();
@@ -58,7 +63,7 @@ pub fn create_arxia_wallet(initial_balance: u64) -> Result<String, String> {
     let private_key_hex = hex::encode(chain.signing_key().to_bytes());
 
     let open_block = chain
-        .open(initial_balance, &mut vclock)
+        .open_with_network(initial_balance, &mut vclock, network)
         .map_err(|e| format!("open block error: {e:?}"))?;
 
     let result = serde_json::json!({
@@ -80,11 +85,13 @@ pub fn create_arxia_wallet(initial_balance: u64) -> Result<String, String> {
 /// # Arguments
 /// - `private_key_hex`  — 64-char hex Ed25519 signing key (first 32 bytes of BIP39 seed)
 /// - `initial_balance`  — balance in micro-ARX
+/// - `network` — chain-id for the genesis block (e.g. "local", "testnet",
+///   "mainnet"), or empty string for backward-compat
 ///
 /// # Returns
 /// Same JSON shape as `create_arxia_wallet`.
 #[wasm_bindgen]
-pub fn create_wallet_from_privkey(private_key_hex: &str, initial_balance: u64) -> Result<String, String> {
+pub fn create_wallet_from_privkey(private_key_hex: &str, initial_balance: u64, network: &str) -> Result<String, String> {
     console_error_panic_hook::set_once();
     let signing_key = signing_key_from_hex(private_key_hex)?;
     let mut vclock = VectorClock::new();
@@ -93,7 +100,7 @@ pub fn create_wallet_from_privkey(private_key_hex: &str, initial_balance: u64) -
 
     let pub_key_hex = chain.public_key_hex.clone();
     let open_block = chain
-        .open(initial_balance, &mut vclock)
+        .open_with_network(initial_balance, &mut vclock, network)
         .map_err(|e| format!("open block error: {e:?}"))?;
 
     let result = serde_json::json!({
@@ -476,7 +483,7 @@ pub fn build_gossip_ping(sk_hex: &str, node_id: &str, timestamp_ms: u64) -> Resu
 
 /// Build a `SignedGossipMessage::BlockAnnounce` carrying a single
 /// block. The block is serialized to JSON bytes (which match the
-/// 193-byte compact form for canonical lattice blocks). The
+/// 194-byte compact form for canonical lattice blocks). The
 /// envelope is signed with the wallet's signing key.
 ///
 /// `hops` is clamped to `MAX_BLOCK_ANNOUNCE_HOPS` (16) at the
@@ -1087,16 +1094,43 @@ pub fn build_nonce_sync_response(
     serde_json::to_string(&envelope).map_err(|e| e.to_string())
 }
 
+// ── DID verification ─────────────────────────────────────────────
+
+#[wasm_bindgen]
+pub fn wasm_verify_did(did_str: &str) -> Result<String, String> {
+    console_error_panic_hook::set_once();
+    let parsed = arxia_did::parse_did(did_str)
+        .map_err(|e| format!("Invalid DID: {e}"))?;
+    Ok(parsed.did)
+}
+
+#[wasm_bindgen]
+pub fn wasm_verify_did_owner(did_str: &str, public_key_hex: &str) -> Result<bool, String> {
+    console_error_panic_hook::set_once();
+    let parsed = arxia_did::parse_did(did_str)
+        .map_err(|e| format!("Invalid DID: {e}"))?;
+    let key_bytes: [u8; 32] = hex::decode(public_key_hex)
+        .map_err(|e| format!("Invalid public key hex: {e}"))?
+        .try_into()
+        .map_err(|_| "Public key must be 32 bytes".to_string())?;
+    Ok(parsed.matches_pubkey(&key_bytes))
+}
+
 // ── tests (native only) ───────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Test helper: create wallet with backward-compat (empty network).
+    fn test_create_wallet(balance: u64) -> Result<String, String> {
+        create_arxia_wallet(balance, "")
+    }
+
     #[test]
     fn test_full_wallet_flow() {
         // Create Alice's wallet
-        let alice_json = create_arxia_wallet(500_000_000).unwrap();
+        let alice_json = test_create_wallet(500_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let alice_priv = alice["private_key_hex"].as_str().unwrap();
         let alice_pub  = alice["public_key_hex"].as_str().unwrap();
@@ -1104,7 +1138,7 @@ mod tests {
         let alice_vclock = serde_json::to_string(&alice["vclock"]).unwrap();
 
         // Create Bob's wallet
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let bob_priv = bob["private_key_hex"].as_str().unwrap();
         let bob_pub  = bob["public_key_hex"].as_str().unwrap();
@@ -1147,7 +1181,7 @@ mod tests {
     // ── verify_block_json / verify_chain_json ──────────────────────────────
 
     fn make_alice_open_block_json() -> String {
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         serde_json::to_string(&alice["open_block"]).unwrap()
     }
@@ -1189,13 +1223,13 @@ mod tests {
 
     #[test]
     fn test_verify_chain_json_accepts_legit_send_then_receive() {
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let alice_priv = alice["private_key_hex"].as_str().unwrap();
         let alice_chain = serde_json::to_string(&serde_json::json!([alice["open_block"]])).unwrap();
         let alice_vclock = serde_json::to_string(&alice["vclock"]).unwrap();
 
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let bob_pub = bob["public_key_hex"].as_str().unwrap();
         let bob_priv = bob["private_key_hex"].as_str().unwrap();
@@ -1229,12 +1263,12 @@ mod tests {
 
     #[test]
     fn test_verify_chain_json_rejects_tampered_block_in_middle() {
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let alice_priv = alice["private_key_hex"].as_str().unwrap();
         let alice_chain = serde_json::to_string(&serde_json::json!([alice["open_block"]])).unwrap();
         let alice_vclock = serde_json::to_string(&alice["vclock"]).unwrap();
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let bob_pub = bob["public_key_hex"].as_str().unwrap();
         let bob_priv = bob["private_key_hex"].as_str().unwrap();
@@ -1266,7 +1300,7 @@ mod tests {
 
     #[test]
     fn test_parse_did_strict_accepts_canonical_did() {
-        let alice_json = create_arxia_wallet(0).unwrap();
+        let alice_json = test_create_wallet(0).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let pubkey_hex = alice["public_key_hex"].as_str().unwrap();
         let did = get_did(pubkey_hex).unwrap();
@@ -1532,12 +1566,12 @@ mod tests {
         // Build a block, add to local, build a divergent block at the
         // same (account, nonce) to model a conflict, then ask the
         // gossip layer to sync.
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let alice_priv = alice["private_key_hex"].as_str().unwrap();
         let alice_chain = serde_json::to_string(&serde_json::json!([alice["open_block"]])).unwrap();
         let alice_vclock = serde_json::to_string(&alice["vclock"]).unwrap();
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let bob_pub = bob["public_key_hex"].as_str().unwrap();
         let bob_priv = bob["private_key_hex"].as_str().unwrap();
@@ -1558,7 +1592,7 @@ mod tests {
 
         // Construct a divergent block at the same (account, nonce)
         // by re-signing a competing send to a different destination.
-        let bob2_json = create_arxia_wallet(0).unwrap();
+        let bob2_json = test_create_wallet(0).unwrap();
         let bob2: serde_json::Value = serde_json::from_str(&bob2_json).unwrap();
         let bob2_pub = bob2["public_key_hex"].as_str().unwrap();
         let _ = bob_priv; // silence unused
@@ -1729,9 +1763,9 @@ mod tests {
     fn test_reconcile_partitions_balances_match() {
         // Two chains with disjoint accounts; reconciliation
         // should produce the union of balances.
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let chain_a = serde_json::to_string(&serde_json::json!([
             alice["open_block"],
@@ -1753,15 +1787,15 @@ mod tests {
     fn test_reconcile_partitions_detects_conflict() {
         // Same account, same nonce, different SEND destinations
         // → diverging hashes → exactly one conflict entry.
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let alice_priv = alice["private_key_hex"].as_str().unwrap();
         let alice_chain = serde_json::to_string(&serde_json::json!([alice["open_block"]])).unwrap();
         let alice_vclock = serde_json::to_string(&alice["vclock"]).unwrap();
-        let bob_json = create_arxia_wallet(0).unwrap();
+        let bob_json = test_create_wallet(0).unwrap();
         let bob: serde_json::Value = serde_json::from_str(&bob_json).unwrap();
         let bob_pub = bob["public_key_hex"].as_str().unwrap();
-        let bob2_json = create_arxia_wallet(0).unwrap();
+        let bob2_json = test_create_wallet(0).unwrap();
         let bob2: serde_json::Value = serde_json::from_str(&bob2_json).unwrap();
         let bob2_pub = bob2["public_key_hex"].as_str().unwrap();
 
@@ -1807,7 +1841,7 @@ mod tests {
     #[test]
     fn test_build_nonce_sync_response_round_trips() {
         let (sk, _vk) = fresh_keypair_hex();
-        let alice_json = create_arxia_wallet(1_000_000).unwrap();
+        let alice_json = test_create_wallet(1_000_000).unwrap();
         let alice: serde_json::Value = serde_json::from_str(&alice_json).unwrap();
         let open_block: Block = serde_json::from_value(alice["open_block"].clone()).unwrap();
         let account_bytes: [u8; 32] = hex::decode(&open_block.account).unwrap().try_into().unwrap();

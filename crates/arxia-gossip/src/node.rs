@@ -12,7 +12,7 @@ use arxia_lattice::validation::verify_block;
 
 /// Default capacity of [`GossipNode::known_blocks`].
 ///
-/// At the lattice's compact-block size of 193 B, 10 000 blocks ≈ 1.9 MB
+/// At the lattice's compact-block size of 194 B, 10 000 blocks ≈ 1.9 MB
 /// of header memory — comfortable on a T-Beam-class device with ~320 KB
 /// of free DRAM after the runtime, and bounded enough that an attacker
 /// flooding valid signed blocks cannot OOM the process. (CRIT-011)
@@ -641,6 +641,113 @@ mod tests {
             node.add_peer(format!("peer-{i:05}"));
         }
         assert_eq!(node.peers.len(), 10_000);
+    }
+
+    // ========================================================================
+    // check_sync (line 238-240) — delegation to sync_nonces_before_l1
+    // ========================================================================
+
+    #[test]
+    fn test_check_sync_returns_no_neighbors_for_empty_registry() {
+        let node = GossipNode::new("n1".into());
+        let remote = NonceRegistry::new();
+        assert_eq!(node.check_sync(&remote), SyncResult::NoNeighbors);
+    }
+
+    #[test]
+    fn test_check_sync_returns_mismatch_when_registries_differ() {
+        // Add entries to nonce_registry, then check_sync with a peer
+        // registry that has different hashes → Mismatch.
+        let mut node = GossipNode::new("n1".into());
+        let acc = [0xAAu8; 32];
+        node.nonce_registry.insert((acc, 1), [0xBBu8; 32]);
+        node.nonce_registry.insert(([0xCCu8; 32], 2), [0xDDu8; 32]);
+        let mut remote = NonceRegistry::new();
+        remote.insert((acc, 1), [0xBBu8; 32]); // same
+        remote.insert(([0xCCu8; 32], 2), [0xEEu8; 32]); // different
+        assert_eq!(node.check_sync(&remote), SyncResult::Mismatch(1));
+    }
+
+    #[test]
+    fn test_check_sync_returns_success_when_registries_match() {
+        let mut node = GossipNode::new("n1".into());
+        let acc = [0xAAu8; 32];
+        node.nonce_registry.insert((acc, 1), [0xBBu8; 32]);
+        let mut remote = NonceRegistry::new();
+        remote.insert((acc, 1), [0xBBu8; 32]);
+        assert_eq!(node.check_sync(&remote), SyncResult::Success);
+    }
+
+    // ========================================================================
+    // merge_registry defense-in-depth: break when order tracker empty
+    // (line 205). Also exercises evict_oldest_nonce_entry returning false
+    // when order tracker is empty (lines 225, 227).
+    //
+    // Directly mutating the public nonce_registry field desyncs it from
+    // the private nonce_registry_order tracker, forcing the eviction loop
+    // to bail out.
+    // ========================================================================
+
+    #[test]
+    fn test_merge_registry_break_when_order_tracker_empty() {
+        // Defense-in-depth: directly mutating the public nonce_registry
+        // field desyncs it from the private order tracker. If the
+        // registry is already over capacity and merge_registry adds NO
+        // new entries (so nothing is appended to the order tracker),
+        // eviction finds an empty tracker, returns false, and the outer
+        // loop breaks at line 205. Also exercises evict returning false
+        // (lines 225, 227).
+        let mut node = GossipNode::with_capacity("n1".into(), 100, 2);
+        // Direct mutation — no order-tracker entries created
+        node.nonce_registry.insert(([0xAAu8; 32], 1), [0xBBu8; 32]);
+        node.nonce_registry.insert(([0xCCu8; 32], 2), [0xDDu8; 32]);
+        node.nonce_registry.insert(([0xEEu8; 32], 3), [0xFFu8; 32]);
+        assert_eq!(node.nonce_registry.len(), 3);
+
+        // Remote has only already-known keys — merge adds nothing
+        let mut remote = NonceRegistry::new();
+        remote.insert(([0xAAu8; 32], 1), [0xBBu8; 32]);
+        remote.insert(([0xCCu8; 32], 2), [0xDDu8; 32]);
+        remote.insert(([0xEEu8; 32], 3), [0xFFu8; 32]);
+        let conflicts = node.merge_registry(&remote);
+        assert!(conflicts.is_empty());
+        // Registry stays over cap because eviction had no order-tracker
+        // entries to evict
+        let msg = "registry should remain over cap when eviction skipped".to_string();
+        assert_eq!(
+            node.nonce_registry.len(),
+            3,
+            "{}",
+            msg
+        );
+        assert_eq!(node.nonce_registry_dropped(), 0);
+    }
+
+    #[test]
+    fn test_evict_skips_stale_order_tracker_entry() {
+        // Hit the fall-through in evict_oldest_nonce_entry (line 225)
+        // when an entry in nonce_registry_order was already removed
+        // from the nonce_registry by direct mutation.
+        let mut node = GossipNode::with_capacity("n1".into(), 100, 2);
+        // Insert two entries via merge so both registry + order are in sync
+        let mut remote = NonceRegistry::new();
+        remote.insert(([0xAAu8; 32], 1), [0xBBu8; 32]);
+        remote.insert(([0xCCu8; 32], 2), [0xDDu8; 32]);
+        node.merge_registry(&remote);
+        assert_eq!(node.nonce_registry.len(), 2);
+        // Remove one entry directly from the public field — order tracker
+        // still holds its key (stale).
+        node.nonce_registry.remove(&([0xAAu8; 32], 1));
+        // Insert a third entry to trigger eviction (capacity = 2, have 2
+        // entries after removal but eviction checks len before removal).
+        // Wait — after the direct removal, len is 1 (under cap). Need
+        // to add 2+ entries so eviction fires and finds the stale entry.
+        let mut remote2 = NonceRegistry::new();
+        remote2.insert(([0x11u8; 32], 3), [0x22u8; 32]);
+        remote2.insert(([0x33u8; 32], 4), [0x44u8; 32]);
+        node.merge_registry(&remote2);
+        // Registry should now be at capacity with no stale entries
+        assert_eq!(node.nonce_registry.len(), 2);
     }
 
     #[test]

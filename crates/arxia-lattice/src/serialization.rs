@@ -1,7 +1,11 @@
-//! Compact binary serialization (193 bytes per block) for LoRa transport.
+//! Compact binary serialization (194 bytes per block) for LoRa transport.
 //!
 //! Layout: [1B type][32B account][32B prev_hash][8B balance][8B nonce]
 //! [8B timestamp][8B amount/initial][32B dest_or_source][64B signature]
+//! [1B network_discriminator]
+//!
+//! Network discriminator: 0x00="", 0x01="local", 0x02="testnet", 0x03="mainnet".
+//! Byte 193 (last byte) was added in commit XXX; unknown values decode to "".
 //!
 //! # Loud failure on malformed hex (HIGH-004)
 //!
@@ -35,7 +39,7 @@ fn hex_decode_32(field_name: &str, s: &str) -> Result<[u8; 32], ArxiaError> {
     })
 }
 
-/// Serialize a block to compact binary format (193 bytes).
+/// Serialize a block to compact binary format (194 bytes).
 ///
 /// # Errors
 ///
@@ -108,24 +112,46 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
         // Signature length mismatch is a separate concern from hex
         // decoding (the field is a Vec<u8>, not a hex string). The
         // current behavior preserves the pre-fix semantics: pad with
-        // zeros so the wire format is still 193 bytes. A
+        // zeros so the wire format is still 194 bytes. A
         // missing/wrong-length signature is caught by `verify_block`
         // downstream.
         //
         // LOW-005 (commit 076): callers that want to fail loudly
         // on a wrong-length signature instead of silently padding
         // can use [`to_compact_bytes_strict`]. Both forms produce
-        // identical 193-byte output for canonical inputs.
+        // identical 194-byte output for canonical inputs.
         buf.extend_from_slice(&[0u8; 64]);
     }
+
+    buf.push(network_to_discriminator(&block.network));
     Ok(buf)
+}
+
+fn network_to_discriminator(network: &str) -> u8 {
+    match network {
+        "" => 0x00,
+        "local" => 0x01,
+        "testnet" => 0x02,
+        "mainnet" => 0x03,
+        _ => 0x00,
+    }
+}
+
+fn discriminator_to_network(d: u8) -> &'static str {
+    match d {
+        0x00 => "",
+        0x01 => "local",
+        0x02 => "testnet",
+        0x03 => "mainnet",
+        _ => "",
+    }
 }
 
 /// Strict variant of [`to_compact_bytes`] that returns an error
 /// instead of silently zero-padding a wrong-length signature.
 ///
 /// LOW-005 (commit 076): the lenient form pads with `[0u8; 64]`
-/// so the wire format is always 193 bytes ; downstream
+/// so the wire format is always 194 bytes ; downstream
 /// `verify_block` catches the all-zero signature. Sensitive
 /// callers (e.g. those serialising blocks for long-term archival
 /// where downstream verify isn't run on every read) can use this
@@ -144,7 +170,7 @@ pub fn to_compact_bytes_strict(block: &Block) -> Result<Vec<u8>, ArxiaError> {
     to_compact_bytes(block)
 }
 
-/// Deserialize a block from compact binary format (193 bytes).
+/// Deserialize a block from compact binary format (194 bytes).
 pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     if data.len() < COMPACT_BLOCK_SIZE {
         return Err(ArxiaError::DataTooShort {
@@ -167,10 +193,7 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     // length check, the panic becomes a typed `DataTooShort`
     // instead of an `unwrap` panic.
     let to_8_bytes = |slice: &[u8]| -> Result<[u8; 8], ArxiaError> {
-        slice.try_into().map_err(|_| ArxiaError::DataTooShort {
-            got: data.len(),
-            expected: COMPACT_BLOCK_SIZE,
-        })
+        try_8_bytes(slice, data.len())
     };
     let balance = u64::from_be_bytes(to_8_bytes(&data[65..73])?);
     let nonce = u64::from_be_bytes(to_8_bytes(&data[73..81])?);
@@ -178,6 +201,7 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     let amount = u64::from_be_bytes(to_8_bytes(&data[89..97])?);
     let dest_src = hex::encode(&data[97..129]);
     let signature = data[129..193].to_vec();
+    let network = discriminator_to_network(data[193]);
     let block_type = match tag {
         0x00 => BlockType::Open {
             initial_balance: amount,
@@ -199,7 +223,9 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     // hash is a pure function of the serialized payload and is identical
     // across nodes with out-of-sync clocks. Regression tests below pin
     // this property.
-    let hash = Block::compute_hash(&account, &previous, &block_type, balance, nonce, timestamp)?;
+    let hash = Block::compute_hash_with_network(
+        &account, &previous, &block_type, balance, nonce, timestamp, network,
+    )?;
     Ok(Block {
         account,
         previous,
@@ -209,6 +235,16 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
         timestamp,
         hash,
         signature,
+        network: network.to_string(),
+        pq_public_key: None,
+        pq_signature: None,
+    })
+}
+
+fn try_8_bytes(slice: &[u8], data_len: usize) -> Result<[u8; 8], ArxiaError> {
+    slice.try_into().map_err(|_| ArxiaError::DataTooShort {
+        got: data_len,
+        expected: COMPACT_BLOCK_SIZE,
     })
 }
 
@@ -242,12 +278,12 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_size_193_bytes() {
-        assert_eq!(COMPACT_BLOCK_SIZE, 193);
+    fn test_compact_size_194_bytes() {
+        assert_eq!(COMPACT_BLOCK_SIZE, 194);
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block = chain.open(42, &mut vc).unwrap();
-        assert_eq!(to_compact_bytes(&block).unwrap().len(), 193);
+        assert_eq!(to_compact_bytes(&block).unwrap().len(), 194);
     }
 
     #[test]
@@ -378,10 +414,11 @@ mod tests {
         let mut block = base_open_block();
         block.account = "GG".repeat(32); // 64 chars, but G is not hex
         let result = to_compact_bytes(&block);
+        let msg = format!("expected HexDecode, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HexDecode(_))),
-            "expected HexDecode, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -393,10 +430,11 @@ mod tests {
         let mut block = base_open_block();
         block.account = "ab".repeat(8); // 16 chars = 8 bytes
         let result = to_compact_bytes(&block);
+        let msg = format!("expected InvalidKey, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::InvalidKey(_))),
-            "expected InvalidKey, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -406,10 +444,11 @@ mod tests {
         let mut block = base_open_block();
         block.previous = "ZZ".repeat(32); // non-hex (Z is not hex)
         let result = to_compact_bytes(&block);
+        let msg = format!("expected HexDecode, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HexDecode(_))),
-            "expected HexDecode, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -439,10 +478,11 @@ mod tests {
             amount: 100,
         };
         let result = to_compact_bytes(&block);
+        let msg = format!("expected HexDecode for malformed destination, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HexDecode(_))),
-            "expected HexDecode for malformed destination, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -454,10 +494,11 @@ mod tests {
             source_hash: "ZZ".repeat(32),
         };
         let result = to_compact_bytes(&block);
+        let msg = format!("expected HexDecode for malformed source_hash, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HexDecode(_))),
-            "expected HexDecode for malformed source_hash, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -469,10 +510,11 @@ mod tests {
             credential_hash: "QQ".repeat(32),
         };
         let result = to_compact_bytes(&block);
+        let msg = format!("expected HexDecode for malformed credential_hash, got {:?}", result);
         assert!(
             matches!(result, Err(ArxiaError::HexDecode(_))),
-            "expected HexDecode for malformed credential_hash, got {:?}",
-            result
+            "{}",
+            msg
         );
     }
 
@@ -517,8 +559,18 @@ mod tests {
             result,
             Err(ArxiaError::DataTooShort {
                 got: 100,
-                expected: 193
+                expected: 194
             })
+        ));
+    }
+
+    #[test]
+    fn test_try_8_bytes_errors_on_short_slice() {
+        let short = [0u8; 4];
+        let result = try_8_bytes(&short, 4);
+        assert!(matches!(
+            result,
+            Err(ArxiaError::DataTooShort { got: 4, expected: 194 })
         ));
     }
 
@@ -543,10 +595,13 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
+        let msg = "MED-003: production code must use typed `?` propagation \
+             instead of .expect(\"8 bytes\") on slice-to-array conversions"
+            .to_string();
         assert!(
             !production.contains(".expect(\"8 bytes\")"),
-            "MED-003: production code must use typed `?` propagation \
-             instead of .expect(\"8 bytes\") on slice-to-array conversions"
+            "{}",
+            msg
         );
     }
 
@@ -563,14 +618,14 @@ mod tests {
     #[test]
     fn test_to_compact_bytes_lenient_zero_pads_short_signature() {
         // Pin the existing lenient behaviour (regression guard).
-        // A block with a 0-byte signature serialises to 193
+        // A block with a 0-byte signature serialises to 194
         // bytes ; the last 64 bytes are all zero.
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let mut block = chain.open(1, &mut vc).unwrap();
         block.signature = Vec::new(); // wrong length: 0
         let bytes = to_compact_bytes(&block).unwrap();
-        assert_eq!(bytes.len(), 193);
+        assert_eq!(bytes.len(), 194);
         assert_eq!(&bytes[129..193], &[0u8; 64], "lenient form pads with zeros");
     }
 
@@ -590,7 +645,10 @@ mod tests {
                 assert!(msg.contains("64"));
                 assert!(msg.contains("32"));
             }
-            other => panic!("expected SignatureInvalid, got {other:?}"),
+            other => {
+                let msg = format!("expected SignatureInvalid, got {other:?}");
+                panic!("{}", msg);
+            }
         }
     }
 
@@ -632,5 +690,186 @@ mod tests {
         assert!(to_compact_bytes_strict(&block).is_err());
         // Lenient form still works (regression guard).
         assert!(to_compact_bytes(&block).is_ok());
+    }
+
+    // ============================================================
+    // network_to_discriminator / discriminator_to_network coverage
+    // ============================================================
+
+    #[test]
+    fn test_network_to_discriminator_all_branches() {
+        assert_eq!(network_to_discriminator(""), 0x00);
+        assert_eq!(network_to_discriminator("local"), 0x01);
+        assert_eq!(network_to_discriminator("testnet"), 0x02);
+        assert_eq!(network_to_discriminator("mainnet"), 0x03);
+        assert_eq!(network_to_discriminator("unknown"), 0x00);
+    }
+
+    #[test]
+    fn test_discriminator_to_network_all_branches() {
+        assert_eq!(discriminator_to_network(0x00), "");
+        assert_eq!(discriminator_to_network(0x01), "local");
+        assert_eq!(discriminator_to_network(0x02), "testnet");
+        assert_eq!(discriminator_to_network(0x03), "mainnet");
+        assert_eq!(discriminator_to_network(0xFF), "");
+    }
+
+    // ============================================================
+    // from_compact_bytes – tag dispatch coverage
+    // ============================================================
+
+    #[test]
+    fn test_from_compact_bytes_invalid_block_type() {
+        let mut data = vec![0u8; COMPACT_BLOCK_SIZE];
+        data[0] = 0x04;
+        let result = from_compact_bytes(&data);
+        assert!(matches!(result, Err(ArxiaError::InvalidBlockType(0x04))));
+    }
+
+    #[test]
+    fn test_from_compact_bytes_invalid_block_type_high_tag() {
+        let mut data = vec![0u8; COMPACT_BLOCK_SIZE];
+        data[0] = 0xFF;
+        let result = from_compact_bytes(&data);
+        assert!(matches!(result, Err(ArxiaError::InvalidBlockType(0xFF))));
+    }
+
+    // ============================================================
+    // Receive / Revoke block round-trips
+    // ============================================================
+
+    #[test]
+    fn test_compact_round_trip_receive() {
+        let mut block = base_open_block();
+        block.block_type = BlockType::Receive {
+            source_hash: "ab".repeat(32),
+        };
+        let bytes = to_compact_bytes(&block).expect("Receive should serialize");
+        assert_eq!(bytes[0], 0x02);
+        assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.balance, block.balance);
+        match &restored.block_type {
+            BlockType::Receive { source_hash } => {
+                assert_eq!(source_hash, &"ab".repeat(32));
+            }
+            _ => {
+                let msg = "expected Receive".to_string();
+                panic!("{}", msg);
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_round_trip_revoke() {
+        let mut block = base_open_block();
+        block.block_type = BlockType::Revoke {
+            credential_hash: "ab".repeat(32),
+        };
+        let bytes = to_compact_bytes(&block).expect("Revoke should serialize");
+        assert_eq!(bytes[0], 0x03);
+        assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.balance, block.balance);
+        match &restored.block_type {
+            BlockType::Revoke { credential_hash } => {
+                assert_eq!(credential_hash, &"ab".repeat(32));
+            }
+            _ => {
+                let msg = "expected Revoke".to_string();
+                panic!("{}", msg);
+            }
+        }
+    }
+
+    // ============================================================
+    // Network discriminator serialization / deserialization
+    // ============================================================
+
+    #[test]
+    fn test_to_compact_bytes_network_discriminator_empty() {
+        let block = base_open_block();
+        assert_eq!(block.network, "");
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes[COMPACT_BLOCK_SIZE - 1], 0x00);
+    }
+
+    #[test]
+    fn test_to_compact_bytes_network_discriminator_local() {
+        let mut block = base_open_block();
+        block.network = "local".to_string();
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes[COMPACT_BLOCK_SIZE - 1], 0x01);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.network, "local");
+    }
+
+    #[test]
+    fn test_to_compact_bytes_network_discriminator_testnet() {
+        let mut block = base_open_block();
+        block.network = "testnet".to_string();
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes[COMPACT_BLOCK_SIZE - 1], 0x02);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.network, "testnet");
+    }
+
+    #[test]
+    fn test_to_compact_bytes_network_discriminator_mainnet() {
+        let mut block = base_open_block();
+        block.network = "mainnet".to_string();
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes[COMPACT_BLOCK_SIZE - 1], 0x03);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.network, "mainnet");
+    }
+
+    #[test]
+    fn test_to_compact_bytes_unknown_network_defaults_to_empty() {
+        let mut block = base_open_block();
+        block.network = "custom".to_string();
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes[COMPACT_BLOCK_SIZE - 1], 0x00);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.network, "");
+    }
+
+    // ============================================================
+    // Signature padding: lenient form with long signature
+    // ============================================================
+
+    #[test]
+    fn test_to_compact_bytes_lenient_zero_pads_long_signature() {
+        let mut block = base_open_block();
+        block.signature = vec![0xCC; 128];
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
+        assert_eq!(&bytes[129..COMPACT_BLOCK_SIZE - 1], &[0u8; 64]);
+    }
+
+    // ============================================================
+    // to_compact_bytes_strict with valid Receive / Revoke blocks
+    // ============================================================
+
+    #[test]
+    fn test_to_compact_bytes_strict_receive_happy() {
+        let mut block = base_open_block();
+        block.block_type = BlockType::Receive {
+            source_hash: "ab".repeat(32),
+        };
+        let lenient = to_compact_bytes(&block).unwrap();
+        let strict = to_compact_bytes_strict(&block).unwrap();
+        assert_eq!(lenient, strict);
+    }
+
+    #[test]
+    fn test_to_compact_bytes_strict_revoke_happy() {
+        let mut block = base_open_block();
+        block.block_type = BlockType::Revoke {
+            credential_hash: "ab".repeat(32),
+        };
+        let lenient = to_compact_bytes(&block).unwrap();
+        let strict = to_compact_bytes_strict(&block).unwrap();
+        assert_eq!(lenient, strict);
     }
 }

@@ -72,10 +72,7 @@ mod tests {
         // (e.g. accidentally emitting the all-zero output for
         // empty input) fails this test immediately.
         let hex = hash_blake3(&[]);
-        assert_eq!(
-            hex, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
-            "Blake3 of empty input must match the official test vector"
-        );
+        assert_eq!(hex, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262", "Blake3 of empty input must match the official test vector");
         let bytes = hash_blake3_bytes(&[]);
         assert_eq!(bytes.len(), 32);
         assert_eq!(hex::encode(bytes), hex);

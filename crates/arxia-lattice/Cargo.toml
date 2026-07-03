@@ -11,6 +11,7 @@ description = "Block Lattice implementation for the Arxia protocol"
 [dependencies]
 arxia-core = { workspace = true }
 arxia-crypto = { workspace = true }
+ml-dsa = { workspace = true }
 ed25519-dalek = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true }

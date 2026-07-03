@@ -9,8 +9,8 @@ pub const L0_CAP_MICRO_ARX: u64 = 10_000_000;
 /// L1 finality cap in USD equivalent.
 pub const L1_CAP_USD: f64 = 50.0;
 
-/// Compact block serialization size in bytes.
-pub const COMPACT_BLOCK_SIZE: usize = 193;
+/// Compact block serialization size in bytes (was 193 before network field).
+pub const COMPACT_BLOCK_SIZE: usize = 194;
 
 /// LoRa maximum transmission unit in bytes.
 pub const LORA_MTU: usize = 256;
